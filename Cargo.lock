@@ -2388,6 +2388,7 @@ dependencies = [
  "parking_lot",
  "rcgen 0.13.2",
  "rustls",
+ "serde_json",
  "serde_yaml",
  "smol_str",
  "smoltcp",

@@ -83,6 +83,20 @@ async fn reference_psk_and_injected_session_exchange_datagrams() {
                 channel.cipher()
             );
             drop(channel);
+            let mut wrong_key = parameters.key.clone();
+            match &mut wrong_key {
+                meow_openconnect::dtls::Key::Psk { secret, .. } => secret[0] ^= 1,
+                meow_openconnect::dtls::Key::Resume { secret, .. } => secret[0] ^= 1,
+            }
+            let rejected = Channel::connect(
+                (address.ip(), parameters.port).into(),
+                wrong_key,
+                parameters.mtu,
+                Duration::from_secs(5),
+            )
+            .await;
+            assert!(rejected.is_err(), "{mode} accepted an incorrect key");
+            eprintln!("reference {mode}: incorrect key rejected");
             drop(tunnel);
             server.kill().await.unwrap();
             server.wait().await.unwrap();

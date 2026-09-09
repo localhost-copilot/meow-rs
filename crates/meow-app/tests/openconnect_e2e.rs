@@ -1,9 +1,14 @@
 #![cfg(all(feature = "openconnect", feature = "listener-mixed"))]
 
+#[cfg(all(feature = "openconnect-dtls", unix))]
+#[path = "support/openconnect_benchmark.rs"]
+mod benchmark;
 #[path = "support/openconnect_gateway.rs"]
 mod gateway;
 #[path = "../../meow-netstack/tests/support/peer.rs"]
 mod peer;
+#[path = "support/udp_fault_relay.rs"]
+mod udp_fault_relay;
 
 use gateway::Gateway;
 use meow_common::Metadata;
@@ -92,17 +97,42 @@ async fn required_dtls_is_not_satisfied_by_a_cstp_only_gateway() {
 #[tokio::test]
 #[ignore = "requires Docker image meow-openconnect-ocserv:test; see docs/openconnect.md"]
 async fn independent_ocserv_password_dns_ipv4_ipv6_tcp_udp() {
-    ocserv_roundtrip("off").await;
+    ocserv_roundtrip("off", false, false).await;
 }
 
 #[cfg(all(feature = "openconnect-dtls", unix))]
 #[tokio::test]
 #[ignore = "requires Docker image meow-openconnect-ocserv:test and OpenSSL 3"]
 async fn independent_ocserv_dtls_password_dns_ipv4_ipv6_tcp_udp() {
-    ocserv_roundtrip("require").await;
+    ocserv_roundtrip("require", false, false).await;
 }
 
-async fn ocserv_roundtrip(mode: &str) {
+#[cfg(all(feature = "openconnect-dtls", unix))]
+#[tokio::test]
+#[ignore = "requires Docker image meow-openconnect-ocserv:test and OpenSSL 3"]
+async fn independent_ocserv_auto_preserves_sockets_across_udp_block_and_recovery() {
+    ocserv_roundtrip("auto", true, false).await;
+}
+
+#[cfg(all(feature = "openconnect-dtls", unix))]
+#[tokio::test]
+#[ignore = "requires Docker image meow-openconnect-ocserv:test and OpenSSL 3"]
+async fn independent_ocserv_require_fails_sockets_when_udp_is_blocked() {
+    ocserv_roundtrip("require", true, false).await;
+}
+
+#[cfg(all(feature = "openconnect-dtls", unix))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "real ocserv Docker benchmark; run with --release and --nocapture"]
+#[allow(clippy::assertions_on_constants)] // Compile in debug test suites, refuse debug measurements.
+async fn benchmark_real_ocserv_tls_dtls() {
+    assert!(!cfg!(debug_assertions), "benchmark requires --release");
+    for mode in ["off", "require"] {
+        ocserv_roundtrip(mode, false, true).await;
+    }
+}
+
+async fn ocserv_roundtrip(mode: &str, fault: bool, measure: bool) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("meow_proxy=debug,meow_openconnect=debug")
         .try_init();
@@ -116,18 +146,21 @@ async fn ocserv_roundtrip(mode: &str) {
                 .status();
         }
     }
-    tokio::time::timeout(Duration::from_secs(45), async {
+    tokio::time::timeout(Duration::from_secs(if measure { 300 } else { 90 }), async {
         let fixture = tempfile::tempdir().unwrap();
         let mount = format!("{}:/fixture", fixture.path().display());
-        let reservation = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let udp_port = reservation.local_addr().unwrap().port();
-        let udp_mapping = format!("127.0.0.1:{udp_port}:{udp_port}/udp");
+        let relay = udp_fault_relay::Relay::new().await;
+        // Benchmarks bypass the fault relay so its copying and watch updates
+        // do not become a DTLS-only performance cost.
+        let udp_port = if measure { relay.backend.port() } else { relay.address.port() };
+        let udp_mapping = format!("127.0.0.1:{}:{udp_port}/udp", relay.backend.port());
         let udp_env = format!("OCSERV_UDP_PORT={udp_port}");
-        drop(reservation);
+        let dpd_env = if fault { "OCSERV_DPD=1" } else { "OCSERV_DPD=30" };
+        let compatibility_env = if measure { "OCSERV_CISCO_COMPAT=false" } else { "OCSERV_CISCO_COMPAT=true" };
         let output = tokio::process::Command::new("docker").args([
             "run", "--rm", "-d", "--cap-add", "NET_ADMIN", "--device", "/dev/net/tun",
             "--sysctl", "net.ipv6.conf.all.disable_ipv6=0", "-p", "127.0.0.1::443", "-v", &mount,
-            "-p", &udp_mapping, "-e", &udp_env,
+            "-p", &udp_mapping, "-e", &udp_env, "-e", dpd_env, "-e", compatibility_env,
             "meow-openconnect-ocserv:test",
         ]).output().await.unwrap();
         assert!(output.status.success(), "docker run failed: {}", String::from_utf8_lossy(&output.stderr));
@@ -145,7 +178,12 @@ async fn ocserv_roundtrip(mode: &str) {
             }
         }).await.expect("ocserv did not become ready");
         let yaml = format!("dns:\n  enable: false\nproxies:\n  - name: vpn\n    type: openconnect\n    server: 127.0.0.1\n    port: {}\n    server-name: vpn.test\n    ca: '{}'\n    username: fixture-user\n    password: fixture-password\n    authgroup: engineering\n    ipv6-disabled: false\n    remote-dns-resolve: true\n", address.port(), fixture.path().join("ca.pem").display());
-        let yaml = format!("{yaml}    dtls-mode: {mode}\n");
+        let yaml = format!("{yaml}    dtls-mode: {mode}\n    mtu: 1400\n    compression: off\nrules:\n  - MATCH,vpn\n");
+        #[cfg(all(feature = "openconnect-dtls", unix))]
+        if measure {
+            benchmark::run(&yaml, mode, &container.0).await;
+            return;
+        }
         let config = meow_config::load_config_from_str(&yaml).await.unwrap();
         let proxy = config.proxies.get("vpn").expect("ocserv fixture configuration must produce a VPN outbound");
         for host in ["service.vpn.test", "ipv6.vpn.test"] {
@@ -166,8 +204,119 @@ async fn ocserv_roundtrip(mode: &str) {
             udp.write_packet(b"ocserv UDP", &destination).await.unwrap();
             let mut received = [0; 32]; let (n, source) = udp.read_packet(&mut received).await.unwrap();
             assert_eq!(source, destination); assert_eq!(&received[..n], b"ocserv UDP");
+            if fault && host == "service.vpn.test" {
+                fault_roundtrip(tcp.as_mut(), udp.as_ref(), destination, mode, &relay).await;
+                if mode == "require" { break; }
+            }
         }
+        if mode == "off" { assert_eq!(relay.stats.borrow().client_datagrams, 0); }
     }).await.unwrap();
+}
+
+async fn fault_roundtrip(
+    tcp: &mut dyn meow_common::ProxyConn,
+    udp: &dyn meow_common::ProxyPacketConn,
+    destination: SocketAddr,
+    mode: &str,
+    relay: &udp_fault_relay::Relay,
+) {
+    use std::sync::atomic::Ordering;
+    let mut stats = relay.stats.clone();
+    tokio::time::timeout(
+        Duration::from_secs(8),
+        stats.wait_for(|s| s.client_application > 0 && s.server_application > 0),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    relay.blocked.store(true, Ordering::SeqCst);
+    let dropped = stats.borrow().dropped_client;
+    udp.write_packet(b"lost-once", &destination).await.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        stats.wait_for(|s| s.dropped_client > dropped),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    if mode == "require" {
+        let mut received = [0; 32];
+        let result = tokio::time::timeout(Duration::from_secs(8), tcp.read(&mut received))
+            .await
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "required DTLS must fail the old TCP socket"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), udp.read_packet(&mut received))
+                .await
+                .unwrap()
+                .is_err()
+        );
+        return;
+    }
+    // Explicit new probes have distinct contents. A lost business datagram is
+    // never retransmitted by this test, so its later appearance detects replay.
+    tokio::time::timeout(Duration::from_secs(12), async {
+        for sequence in 0u32.. {
+            let probe = sequence.to_be_bytes();
+            udp.write_packet(&probe, &destination).await.unwrap();
+            let mut received = [0; 64];
+            if let Ok(result) =
+                tokio::time::timeout(Duration::from_millis(250), udp.read_packet(&mut received))
+                    .await
+            {
+                let (n, source) = result.unwrap();
+                assert_eq!(source, destination);
+                assert_ne!(
+                    &received[..n],
+                    b"lost-once",
+                    "ambiguous datagram was replayed"
+                );
+                assert_eq!(&received[..n], &probe);
+                break;
+            }
+        }
+    })
+    .await
+    .expect("auto did not fall back to CSTP");
+    tcp.write_all(b"TLS fallback").await.unwrap();
+    let mut response = [0; 12];
+    tokio::time::timeout(Duration::from_secs(5), tcp.read_exact(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&response, b"TLS fallback");
+    let previous = *stats.borrow();
+    relay.blocked.store(false, Ordering::SeqCst);
+    tokio::time::timeout(
+        Duration::from_secs(40),
+        stats.wait_for(|s| {
+            s.client_application > previous.client_application
+                && s.server_application > previous.server_application
+        }),
+    )
+    .await
+    .expect("DTLS did not recover")
+    .unwrap();
+    tcp.write_all(b"DTLS recovered").await.unwrap();
+    let mut response = [0; 14];
+    tokio::time::timeout(Duration::from_secs(5), tcp.read_exact(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&response, b"DTLS recovered");
+    udp.write_packet(b"recovered UDP", &destination)
+        .await
+        .unwrap();
+    let mut response = [0; 64];
+    let (n, source) = tokio::time::timeout(Duration::from_secs(5), udp.read_packet(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(source, destination);
+    assert_eq!(&response[..n], b"recovered UDP");
 }
 
 async fn socks(address: SocketAddr, command: u8, port: u16) -> (TcpStream, SocketAddr) {
