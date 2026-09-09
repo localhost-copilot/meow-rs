@@ -25,7 +25,7 @@ fn invalid_or_unimplemented_options_are_not_silently_accepted() {
         "mtu: 575",
         "handshake-timeout: 0",
         "handshake-timeout: 301",
-        "dtls-mode: auto",
+        "dtls-mode: invalid",
         "protocol: f5",
         "compression: all",
         "ipv6-disabled: false\nmtu: 1200",
@@ -52,4 +52,20 @@ fn invalid_or_unimplemented_options_are_not_silently_accepted() {
         false
     )
     .is_ok());
+}
+
+#[cfg(feature = "openconnect")]
+#[test]
+fn dtls_modes_require_the_backend_feature() {
+    for mode in ["auto", "require"] {
+        let result =
+            meow_config::proxy_parser::parse_proxy(&node(&format!("dtls-mode: {mode}")), false);
+        assert_eq!(
+            result.is_ok(),
+            cfg!(all(feature = "openconnect-dtls", unix))
+        );
+        if let Err(error) = result {
+            assert!(error.contains("openconnect-dtls"));
+        }
+    }
 }

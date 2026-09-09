@@ -349,8 +349,23 @@ fn parse_openconnect(
     if options.protocol.as_deref().unwrap_or("anyconnect") != "anyconnect" {
         return Err("openconnect: only protocol: anyconnect is supported".into());
     }
-    if options.dtls_mode.as_deref().unwrap_or("off") != "off" {
-        return Err("openconnect: this build supports only dtls-mode: off".into());
+    use meow_proxy::openconnect_adapter::DtlsMode;
+    let default_dtls = if cfg!(all(feature = "openconnect-dtls", unix)) {
+        "auto"
+    } else {
+        "off"
+    };
+    let dtls_mode = match options.dtls_mode.as_deref().unwrap_or(default_dtls) {
+        "off" => DtlsMode::Off,
+        "auto" => DtlsMode::Auto,
+        "require" => DtlsMode::Require,
+        _ => return Err("openconnect: dtls-mode must be off, auto or require".into()),
+    };
+    if dtls_mode != DtlsMode::Off && !cfg!(all(feature = "openconnect-dtls", unix)) {
+        return Err(
+            "openconnect: DTLS requires --features openconnect-dtls on a supported Unix platform"
+                .into(),
+        );
     }
     if options.compression.as_deref().unwrap_or("off") != "off" {
         return Err("openconnect: compression is not supported".into());
@@ -430,6 +445,7 @@ fn parse_openconnect(
             ipv6: !options.ipv6_disabled.unwrap_or(true),
             remote_dns_resolve: options.remote_dns_resolve.unwrap_or(false),
             dns,
+            dtls_mode,
         },
     )
     .map_err(|e| format!("openconnect: {e}"))

@@ -13,11 +13,98 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+#[cfg(all(feature = "openconnect-dtls", unix))]
+#[tokio::test]
+async fn dtls_blackhole_keeps_auto_cstp_usable_during_handshake() {
+    let gateway = Gateway::start(false).await;
+    let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    gateway.network.send_replace(Some(format!(
+        "X-CSTP-Address: 192.0.2.2\r\nX-CSTP-MTU: 1280\r\nX-CSTP-DPD: 1\r\nX-DTLS-CipherSuite: PSK-NEGOTIATE\r\nX-DTLS-App-ID: {}\r\nX-DTLS-Port: {}\r\n",
+        "42".repeat(32), sink.local_addr().unwrap().port(),
+    )));
+    let config = meow_config::load_config_from_str(
+        &gateway
+            .yaml("fixture-cookie")
+            .replace("dtls-mode: off", "dtls-mode: auto"),
+    )
+    .await
+    .unwrap();
+    let proxy = config.proxies.get("vpn").unwrap();
+    let target = Metadata {
+        dst_ip: Some(peer::ADDRESS.into()),
+        dst_port: 8080,
+        ..Default::default()
+    };
+    let started = tokio::time::Instant::now();
+    let mut tcp = tokio::time::timeout(Duration::from_secs(2), proxy.dial_tcp(&target))
+        .await
+        .expect("auto must not wait for the five-second DTLS handshake")
+        .unwrap();
+    let mut hello = [0; 4096];
+    tokio::time::timeout(Duration::from_secs(2), sink.recv(&mut hello))
+        .await
+        .unwrap()
+        .unwrap();
+    for deadline in [started, started + Duration::from_secs(6)] {
+        tokio::time::sleep_until(deadline).await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tcp.write_all(b"still alive").await.unwrap();
+            let mut answer = [0; 11];
+            tcp.read_exact(&mut answer).await.unwrap();
+            assert_eq!(&answer, b"still alive");
+        })
+        .await
+        .unwrap();
+    }
+    assert_eq!(
+        *gateway.attempts.borrow(),
+        1,
+        "CSTP heartbeats must keep the same generation alive"
+    );
+}
+
+#[cfg(all(feature = "openconnect-dtls", unix))]
+#[tokio::test]
+async fn required_dtls_is_not_satisfied_by_a_cstp_only_gateway() {
+    let gateway = Gateway::start(false).await;
+    let config = meow_config::load_config_from_str(
+        &gateway
+            .yaml("fixture-cookie")
+            .replace("dtls-mode: off", "dtls-mode: require"),
+    )
+    .await
+    .unwrap();
+    let proxy = config.proxies.get("vpn").unwrap();
+    let target = Metadata {
+        dst_ip: Some(peer::ADDRESS.into()),
+        dst_port: 8080,
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        let result = tokio::time::timeout(Duration::from_secs(2), proxy.dial_tcp(&target))
+            .await
+            .unwrap();
+        assert!(result.err().unwrap().to_string().contains("required DTLS"));
+    }
+    assert_eq!(*gateway.attempts.borrow(), 1);
+}
+
 #[tokio::test]
 #[ignore = "requires Docker image meow-openconnect-ocserv:test; see docs/openconnect.md"]
 async fn independent_ocserv_password_dns_ipv4_ipv6_tcp_udp() {
+    ocserv_roundtrip("off").await;
+}
+
+#[cfg(all(feature = "openconnect-dtls", unix))]
+#[tokio::test]
+#[ignore = "requires Docker image meow-openconnect-ocserv:test and OpenSSL 3"]
+async fn independent_ocserv_dtls_password_dns_ipv4_ipv6_tcp_udp() {
+    ocserv_roundtrip("require").await;
+}
+
+async fn ocserv_roundtrip(mode: &str) {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("meow_proxy=debug")
+        .with_env_filter("meow_proxy=debug,meow_openconnect=debug")
         .try_init();
     struct Container(String);
     impl Drop for Container {
@@ -32,9 +119,15 @@ async fn independent_ocserv_password_dns_ipv4_ipv6_tcp_udp() {
     tokio::time::timeout(Duration::from_secs(45), async {
         let fixture = tempfile::tempdir().unwrap();
         let mount = format!("{}:/fixture", fixture.path().display());
+        let reservation = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let udp_port = reservation.local_addr().unwrap().port();
+        let udp_mapping = format!("127.0.0.1:{udp_port}:{udp_port}/udp");
+        let udp_env = format!("OCSERV_UDP_PORT={udp_port}");
+        drop(reservation);
         let output = tokio::process::Command::new("docker").args([
             "run", "--rm", "-d", "--cap-add", "NET_ADMIN", "--device", "/dev/net/tun",
             "--sysctl", "net.ipv6.conf.all.disable_ipv6=0", "-p", "127.0.0.1::443", "-v", &mount,
+            "-p", &udp_mapping, "-e", &udp_env,
             "meow-openconnect-ocserv:test",
         ]).output().await.unwrap();
         assert!(output.status.success(), "docker run failed: {}", String::from_utf8_lossy(&output.stderr));
@@ -52,6 +145,7 @@ async fn independent_ocserv_password_dns_ipv4_ipv6_tcp_udp() {
             }
         }).await.expect("ocserv did not become ready");
         let yaml = format!("dns:\n  enable: false\nproxies:\n  - name: vpn\n    type: openconnect\n    server: 127.0.0.1\n    port: {}\n    server-name: vpn.test\n    ca: '{}'\n    username: fixture-user\n    password: fixture-password\n    authgroup: engineering\n    ipv6-disabled: false\n    remote-dns-resolve: true\n", address.port(), fixture.path().join("ca.pem").display());
+        let yaml = format!("{yaml}    dtls-mode: {mode}\n");
         let config = meow_config::load_config_from_str(&yaml).await.unwrap();
         let proxy = config.proxies.get("vpn").expect("ocserv fixture configuration must produce a VPN outbound");
         for host in ["service.vpn.test", "ipv6.vpn.test"] {

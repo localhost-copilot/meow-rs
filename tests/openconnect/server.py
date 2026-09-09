@@ -2,6 +2,7 @@
 import socket
 import subprocess
 import threading
+import os
 
 subprocess.run([
     "openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
@@ -11,9 +12,9 @@ subprocess.run([
 subprocess.run(["ocpasswd", "-c", "/run/ocpasswd", "-g", "engineering", "fixture-user"],
                input=b"fixture-password\nfixture-password\n", check=True)
 with open("/run/ocserv.conf", "w") as config:
-    config.write('''auth = "plain[passwd=/run/ocpasswd]"
+    config.write(f'''auth = "plain[passwd=/run/ocpasswd]"
 tcp-port = 443
-udp-port = 0
+udp-port = {int(os.environ.get("OCSERV_UDP_PORT", "0"))}
 run-as-user = nobody
 run-as-group = nogroup
 socket-file = /run/ocserv-socket

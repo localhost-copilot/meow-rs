@@ -122,7 +122,6 @@ impl Gateway {
                             (headers, _) = request(&mut tls).await?;
                         }
                         assert!(headers.starts_with("CONNECT /CSCOSSLC/tunnel HTTP/1.1\r\n"));
-                        assert!(!headers.contains("X-DTLS"));
                         if !headers.contains("Cookie: webvpn=fixture-cookie\r\n") {
                             tls.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
                             return Ok(());
@@ -147,7 +146,18 @@ impl Gateway {
                         let network = network.borrow().clone().unwrap_or_else(|| {
                             format!("X-CSTP-Address: 192.0.2.2\r\n{ipv6}X-CSTP-MTU: 1280\r\n")
                         });
-                        tls.write_all(format!("HTTP/1.1 200 CONNECTED\r\nX-CSTP-Version: 1\r\n{network}X-CSTP-DPD: 30\r\n\r\n").as_bytes()).await?;
+                        let dpd = if network.contains("X-CSTP-DPD:") {
+                            ""
+                        } else {
+                            "X-CSTP-DPD: 30\r\n"
+                        };
+                        tls.write_all(
+                            format!(
+                                "HTTP/1.1 200 CONNECTED\r\nX-CSTP-Version: 1\r\n{network}{dpd}\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await?;
                         tls.flush().await?;
                         let (to_peer, peer_in) = mpsc::channel(16);
                         let (peer_out, mut from_peer) = mpsc::channel(16);

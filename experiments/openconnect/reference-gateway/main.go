@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -20,12 +21,15 @@ func (echo) HandlePacket(packet []byte) ([]byte, error) {
 
 func main() {
 	if len(os.Args) != 3 {
-		panic("usage: reference-gateway psk|injected|legacy CA_PATH")
+		panic("usage: reference-gateway psk|psk-app-id|injected|legacy CA_PATH")
 	}
 	scenario := fixture.BasicAnyConnectScenario()
 	switch os.Args[1] {
 	case "psk":
 		scenario.ModernDTLS = true
+	case "psk-app-id":
+		scenario.ModernDTLS = true
+		scenario.DTLSAppID = bytes.Repeat([]byte{0x42}, 32)
 	case "injected":
 		scenario.ModernDTLS = true
 		scenario.InjectedDTLS = true

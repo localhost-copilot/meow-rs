@@ -2382,6 +2382,7 @@ dependencies = [
  "meow-openconnect",
  "meow-proxy",
  "meow-rules",
+ "meow-transport",
  "meow-trie",
  "meow-tunnel",
  "parking_lot",
@@ -2547,9 +2548,13 @@ dependencies = [
 name = "meow-openconnect"
 version = "0.21.2"
 dependencies = [
+ "libc",
+ "libloading 0.8.9",
  "roxmltree",
  "tokio",
  "tokio-util",
+ "tracing",
+ "zeroize",
 ]
 
 [[package]]

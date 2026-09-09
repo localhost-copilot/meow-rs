@@ -42,6 +42,7 @@ anytls = ["meow-config/anytls", "meow-proxy/anytls"]
 # CSTP dual-stack outbound: explicitly opt-in while later VPN capabilities
 # remain under development; excluded from both convenience bundles.
 openconnect = ["meow-config/openconnect", "meow-proxy/openconnect"]
+openconnect-dtls = ["openconnect", "meow-config/openconnect-dtls", "meow-proxy/openconnect-dtls"]
 hysteria2 = ["meow-config/hysteria2", "meow-proxy/hysteria2"]
 ech-tls-tunnel = [
     "ss",
@@ -114,6 +115,7 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
 
 [dev-dependencies]
 meow-openconnect = { workspace = true }
+meow-transport = { workspace = true, default-features = false, features = ["tls"] }
 tokio-util = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }

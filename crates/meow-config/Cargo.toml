@@ -22,6 +22,7 @@ vless-encryption = ["vless", "meow-proxy/vless-encryption"]
 vmess = ["meow-proxy/vmess"]
 anytls = ["meow-proxy/anytls"]
 openconnect = ["meow-proxy/openconnect", "dep:rustls-pemfile"]
+openconnect-dtls = ["openconnect", "meow-proxy/openconnect-dtls"]
 hysteria2 = ["meow-proxy/hysteria2"]
 snell = ["meow-proxy/snell"]
 # Compatibility alias: BoringSSL is the only TLS backend now, so this is a

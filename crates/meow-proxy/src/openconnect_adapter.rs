@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 pub use meow_openconnect::auth::Credentials;
+pub use meow_openconnect::DtlsMode;
 
 mod dns;
 
@@ -36,6 +37,7 @@ pub struct Options {
     pub ipv6: bool,
     pub remote_dns_resolve: bool,
     pub dns: Vec<SocketAddr>,
+    pub dtls_mode: DtlsMode,
 }
 
 struct Parameters {
@@ -81,6 +83,12 @@ pub struct OpenConnectAdapter {
 
 impl OpenConnectAdapter {
     pub fn new(name: &str, options: Options) -> io::Result<Self> {
+        if options.dtls_mode != DtlsMode::Off && !cfg!(all(feature = "openconnect-dtls", unix)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "DTLS requires the openconnect-dtls feature and a supported Unix platform",
+            ));
+        }
         if name.is_empty()
             || options.server.is_empty()
             || options.port == 0
@@ -262,6 +270,8 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
     let tcp =
         meow_common::connect_tcp_host(&parameters.options.server, parameters.options.port).await?;
     tcp.set_nodelay(true)?;
+    #[cfg(all(feature = "openconnect-dtls", unix))]
+    let peer = tcp.peer_addr()?.ip();
     let tls = parameters
         .tls
         .connect(Box::new(tcp))
@@ -294,16 +304,64 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
                 .expect("validated authentication"),
         )
     };
-    let connection = meow_openconnect::connect(
-        tls,
-        &meow_openconnect::Options {
-            authority,
-            cookie,
-            mtu: parameters.options.mtu,
-            ipv6: parameters.options.ipv6,
-        },
-    )
-    .await?;
+    let request = meow_openconnect::Options {
+        authority,
+        cookie,
+        mtu: parameters.options.mtu,
+        ipv6: parameters.options.ipv6,
+    };
+    #[cfg(all(feature = "openconnect-dtls", unix))]
+    let (connection, dtls) = {
+        let mut tls = tls;
+        let mode = parameters.options.dtls_mode;
+        let offer = if mode == DtlsMode::Off {
+            None
+        } else {
+            let offer = meow_openconnect::dtls::Offer::new(|key| {
+                meow_transport::tls::export_keying_material(
+                    tls.get_mut().as_mut(),
+                    key,
+                    "EXPORTER-openconnect-psk",
+                    None,
+                )
+                .map_err(|_| io::Error::other("OpenConnect TLS exporter unavailable"))
+            });
+            match offer {
+                Ok(offer) => Some(offer),
+                Err(error) if mode == DtlsMode::Auto => {
+                    tracing::debug!(%error, "OpenConnect DTLS backend unavailable; using CSTP");
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let mut connection =
+            meow_openconnect::connect_with_dtls(tls, &request, offer.as_ref()).await?;
+        let negotiated = std::mem::replace(&mut connection.dtls, Ok(None));
+        let dtls = match negotiated {
+            Ok(Some(settings)) => {
+                // Fix one MTU for the whole control generation so switching
+                // transports never changes existing TCP segmentation limits.
+                connection.network.mtu = settings.mtu;
+                Some(settings)
+            }
+            Ok(None) if mode == DtlsMode::Require => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "gateway did not negotiate required DTLS",
+                ))
+            }
+            Err(error) if mode == DtlsMode::Require => return Err(error),
+            Err(error) => {
+                tracing::debug!(%error, "OpenConnect DTLS negotiation unavailable; using CSTP");
+                None
+            }
+            Ok(None) => None,
+        };
+        (connection, dtls)
+    };
+    #[cfg(not(all(feature = "openconnect-dtls", unix)))]
+    let connection = meow_openconnect::connect(tls, &request).await?;
     let (to_stack, incoming) = mpsc::channel(64);
     let (outgoing, from_stack) = mpsc::channel(64);
     let stack = Stack::with_addresses(
@@ -333,18 +391,52 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
     }
     let cancel = CancellationToken::new();
     let worker_cancel = cancel.clone();
+    #[cfg(all(feature = "openconnect-dtls", unix))]
+    let mode = parameters.options.dtls_mode;
+    #[cfg(all(feature = "openconnect-dtls", unix))]
+    let (ready, readiness) = tokio::sync::oneshot::channel();
     tokio::spawn(async move {
+        #[cfg(all(feature = "openconnect-dtls", unix))]
+        if let Some(settings) = dtls {
+            if let Err(error) = connection
+                .run_with_dtls(
+                    from_stack,
+                    to_stack,
+                    worker_cancel,
+                    mode,
+                    peer,
+                    settings,
+                    (mode == DtlsMode::Require).then_some(ready),
+                )
+                .await
+            {
+                tracing::debug!(%error, "OpenConnect DTLS/CSTP session ended");
+            }
+            return;
+        }
         if let Err(error) = connection.run(from_stack, to_stack, worker_cancel).await {
             tracing::debug!(%error, "OpenConnect CSTP session ended");
         }
     });
-    Ok(Arc::new(Session {
+    let session = Arc::new(Session {
         generation,
         stack,
         network,
         cancel,
         dns: dns::Resolver::new(servers),
-    }))
+    });
+    #[cfg(all(feature = "openconnect-dtls", unix))]
+    if mode == DtlsMode::Require {
+        // Construct Session first so cancellation/initialization timeout drops
+        // its token and stops both transports while waiting for DTLS readiness.
+        readiness.await.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "OpenConnect control session ended before DTLS was ready",
+            )
+        })??;
+    }
+    Ok(session)
 }
 
 async fn destination(metadata: &Metadata, stack: &Stack) -> Result<SocketAddr> {

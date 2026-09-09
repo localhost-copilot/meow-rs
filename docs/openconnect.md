@@ -1,4 +1,4 @@
-# OpenConnect / AnyConnect 出站（阶段 2）
+# OpenConnect / AnyConnect 出站
 
 meow-rs 可使用 Cookie 或用户名密码建立 AnyConnect CSTP/TLS 隧道，并将规则选中的
 IPv4/IPv6 TCP/UDP 流量送入 VPN。支持 authgroup、VPN DNS 和有界重连。
@@ -6,7 +6,8 @@ IPv4/IPv6 TCP/UDP 流量送入 VPN。支持 authgroup、VPN DNS 和有界重连�
 不修改系统路由或 DNS。
 
 目前是显式启用的 `openconnect` Cargo feature，不包含在默认 `full` 或 `minimal` 中。
-本阶段沿用 meow 的 BoringSSL TLS 层，不引入阶段 0 实验使用的 OpenSSL DTLS 后端。
+CSTP 沿用 meow 的 BoringSSL TLS 层。阶段 3 的 DTLS 后端已接入，仍在补充
+故障切换与性能验收；构建和运行条件见下文。
 
 ## 构建与配置
 
@@ -95,6 +96,43 @@ curl -fsS --max-time 30 --proxy socks5h://127.0.0.1:18080 \
 真实节点 smoke 应按根 [AGENTS.md](../AGENTS.md) 再做 HTTP/1.1 对照，必须手动 opt-in，
 不能放入 CI。本文命令是使用说明，不代表已经执行真实节点验证。
 
+## DTLS（阶段 3 验收中）
+
+```bash
+cargo build --release -p meow-app --features openconnect-dtls
+```
+
+此 feature 隐含 `openconnect`，不加入默认构建。运行时需要 OpenSSL 3 的共享库：
+macOS 使用 Homebrew OpenSSL 3，glibc Linux 使用系统 `libssl.so.3`。
+为避免与 BoringSSL 的同名 C 符号混用，后端通过独立库句柄解析 OpenSSL API；
+glibc 使用 deep binding。当前真实互通验证在 macOS ARM64 上完成，Linux 打包验证
+尚待执行；musl、Windows、BSD 不在本阶段已验证支持范围。
+
+| `dtls-mode` | 行为 |
+| --- | --- |
+| `off` | 不协商 DTLS，所有 IP 包走 CSTP/TLS |
+| `auto` | 尝试 DTLS，失败后使用 CSTP；有效 DTLS 参数仍在时，每 30 秒重试 |
+| `require` | 建立 DTLS 后才发布会话；DTLS 故障使当前 socket 失败，不能回退 TLS 数据通道 |
+
+启用 `openconnect-dtls` 的 Unix 构建默认 `auto`，仅启用 `openconnect` 时默认 `off`，
+并拒绝 `auto` / `require`。初次 DTLS 握手最多 5 秒，整个初始化仍受
+`handshake-timeout` 限制。TLS 控制连接在 DTLS 活动期间继续处理心跳。
+同一控制代次固定使用两条通道都能接受的 MTU；切换不重建用户态栈。
+发送结果不确定的数据报不会跨通道重发。达到网关 DTLS rekey 时间时建立新的
+控制代次，现有 socket 会失败；当前不支持原地 rekey。
+
+已验证：真实 ocserv 1.3.0 / GnuTLS 3.8.9 的现代 PSK，包含 VPN DNS、IPv4/IPv6
+TCP/UDP；参考网关的 App-ID PSK 与 ChaCha20-Poly1305 注入恢复。
+独立 OpenSSL 服务端的首包丢失重传和双向数据报，以及 UDP 黑洞截止测试通过。
+旧 Cisco DTLS 未列入支持范围。完整故障切换验收和 ocserv benchmark 尚未完成。
+
+```bash
+docker build -t meow-openconnect-ocserv:test tests/openconnect
+cargo test --locked -p meow-app --no-default-features \
+  --features openconnect-dtls,listener-mixed --test openconnect_e2e \
+  independent_ocserv_dtls -- --ignored --nocapture
+```
+
 ## 当前契约与限制
 
 - 配置校验不联网。首次业务拨号共享一次初始化；取消一个等待者不会取消其他等待者。
@@ -105,7 +143,7 @@ curl -fsS --max-time 30 --proxy socks5h://127.0.0.1:18080 \
 - 每次重连创建独立代次的地址、MTU、DNS、栈及包队列，旧 TCP/UDP socket 明确失败。
   不恢复已有 TCP，不把发送结果不确定的 UDP 包重新发送到新代次。
 - MFA、浏览器认证和客户端证书尚未支持。
-- `dtls-mode` 仅接受 `off`；业务 UDP 仍可作为 IP 包经 TLS 传输。
+- 业务 UDP 不依赖 DTLS，也可作为 IP 包经 CSTP/TLS 传输。
 - IPv4 默认启用，IPv6 通过 `ipv6-disabled: false` 请求；可接受纯 IPv6 或双栈分配。
   MTU 配置范围 576–1500，IPv6 至少为 1280，最终使用配置值与网关值中的较小值。
   UDP 载荷不得超过有效 MTU 减 28（IPv4）或 48（IPv6）字节，不做出站 IP 分片。

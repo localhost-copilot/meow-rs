@@ -38,6 +38,7 @@ snell = ["dep:argon2", "dep:aes-gcm", "meow-transport/simple-obfs"]
 # TlsLayer through anytls-rs's `TlsConnect` hook, so no second TLS stack.
 anytls = ["dep:meow-anytls"]
 openconnect = ["dep:meow-openconnect", "dep:meow-netstack", "dep:tokio-util", "dep:hickory-proto"]
+openconnect-dtls = ["openconnect", "meow-openconnect/dtls"]
 # Hysteria2 outbound implemented in-tree on top of quiche (BoringSSL-native
 # QUIC + HTTP/3), so it links no rustls and no second crypto library.
 hysteria2 = ["dep:quiche", "dep:boring", "dep:blake2", "dep:webpki-root-certs", "dep:tokio-util"]

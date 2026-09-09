@@ -1,13 +1,13 @@
 # OpenConnect 出站设计
 
-状态：阶段 1、2 已完成；DTLS 等后续阶段仍为设计。
+状态：阶段 1、2 已完成；阶段 3 后端与基础互通已实现，故障切换和性能验收进行中。
 
 日期：2026-09-09
 
 阶段 0 已完成技术实验，见 [验证结果与 API 缺口](openconnect-phase-zero-results.md)。
 现代 DTLS 1.2 的 PSK 和注入恢复已验证；旧 Cisco 模式有已定位的参考网关互通失败，
 尚不列入已验证支持范围。当前接口、限制和复现命令见 [使用说明](../openconnect.md)。
-下文仍描述完整目标架构；DTLS、MFA、split-DNS 等后续能力尚未实现。
+下文仍描述完整目标架构；MFA、split-DNS 等后续能力尚未实现。
 
 ## 1. 设计决策
 
@@ -180,10 +180,15 @@ TLS 1.2 / 1.3 下两端导出结果一致、不同连接密钥不同。完整 Bo
 给产品添加 OpenSSL bindings 就视为集成完成。新增
 [同进程共存探针](../../experiments/openconnect/coexistence/README.md)：
 动态加载 OpenSSL 3 后，macOS 上 1,000 次交错创建与释放上下文/会话通过。
-这不证明完整握手或其他平台支持；后端符号隔离和打包方案仍需完成验证。
+生产后端现采用同一库句柄解析 OpenSSL 3 公开 C API，未直接链接 openssl-sys。
+Tokio AsyncFd 驱动非阻塞 datagram BIO 和 OpenSSL 握手重传计时器，敏感密钥
+使用 Zeroizing 保存。实际控制 TLS exporter 与 App-ID ClientHello 会话绑定已接入。
 
-阶段 3 尚未完成：生产 DTLS 驱动、现代 PSK/注入恢复互通、三种模式、回退与切换、
-丢包/UDP 阻断测试，以及真实 ocserv Docker 的 TLS/DTLS benchmark 均仍待交付。
+macOS ARM64 上已通过真实 ocserv 的现代 PSK（VPN DNS、双栈 TCP/UDP）和参考
+网关的 App-ID PSK、ChaCha20-Poly1305 注入恢复。独立 OpenSSL 服务端的握手
+首包丢失与双向数据报测试、UDP 黑洞截止测试通过。三种模式和切换逻辑已接入。
+阶段 3 尚未完成：完整故障切换验收、Linux 打包验证，以及真实 ocserv Docker 的
+TLS/DTLS benchmark 仍待交付；不把基础连通结果当作完整验收。
 
 ## 7. 配置与 Cargo 接入
 

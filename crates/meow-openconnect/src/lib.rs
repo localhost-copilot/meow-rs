@@ -14,6 +14,17 @@ const HEADER_LIMIT: usize = 32768;
 
 pub mod auth;
 
+#[cfg(feature = "dtls")]
+pub mod dtls;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DtlsMode {
+    #[default]
+    Off,
+    Auto,
+    Require,
+}
+
 /// Request parameters. Cookie is intentionally excluded from Debug output.
 pub struct Options {
     pub authority: String,
@@ -70,11 +81,36 @@ pub struct Connection<S> {
     pub network: NetworkConfig,
     dpd: Duration,
     keepalive: Duration,
+    #[cfg(feature = "dtls")]
+    pub dtls: io::Result<Option<dtls::Parameters>>,
 }
 
 pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    options: &Options,
+) -> io::Result<Connection<S>> {
+    connect_inner(
+        stream,
+        options,
+        #[cfg(feature = "dtls")]
+        None,
+    )
+    .await
+}
+
+#[cfg(feature = "dtls")]
+pub async fn connect_with_dtls<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    options: &Options,
+    offer: Option<&dtls::Offer>,
+) -> io::Result<Connection<S>> {
+    connect_inner(stream, options, offer).await
+}
+
+async fn connect_inner<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     options: &Options,
+    #[cfg(feature = "dtls")] offer: Option<&dtls::Offer>,
 ) -> io::Result<Connection<S>> {
     options.validate()?;
     let cookie = if options.cookie.starts_with("webvpn=") {
@@ -82,10 +118,19 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
     } else {
         format!("webvpn={}", options.cookie)
     };
+    #[cfg(feature = "dtls")]
+    let dtls_headers = offer.map(dtls::Offer::headers).unwrap_or_default();
+    #[cfg(feature = "dtls")]
+    let dtls_text: &str = &dtls_headers;
+    #[cfg(not(feature = "dtls"))]
+    let dtls_text = "";
     let request = format!(
-        "CONNECT /CSCOSSLC/tunnel HTTP/1.1\r\nHost: {}\r\nUser-Agent: meow-rs\r\nCookie: {cookie}\r\nX-CSTP-Version: 1\r\nX-CSTP-MTU: {}\r\nX-CSTP-Address-Type: {}\r\nX-CSTP-Accept-Encoding: identity\r\n\r\n",
+        "CONNECT /CSCOSSLC/tunnel HTTP/1.1\r\nHost: {}\r\nUser-Agent: meow-rs\r\nCookie: {cookie}\r\nX-CSTP-Version: 1\r\nX-CSTP-MTU: {}\r\nX-CSTP-Address-Type: {}\r\nX-CSTP-Accept-Encoding: identity\r\n{}\r\n",
         options.authority, options.mtu, if options.ipv6 { "IPv4,IPv6" } else { "IPv4" },
+        dtls_text,
     );
+    #[cfg(feature = "dtls")]
+    let request = zeroize::Zeroizing::new(request);
     stream.write_all(request.as_bytes()).await?;
     stream.flush().await?;
     let mut stream = BufReader::new(stream);
@@ -118,6 +163,8 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
     let mut version = None;
     let mut dpd = Duration::from_secs(30);
     let mut keepalive = Duration::from_secs(30);
+    #[cfg(feature = "dtls")]
+    let mut dtls_headers = dtls::Headers::default();
     loop {
         let line = header_line(&mut stream, &mut remaining).await?;
         if line == "\r\n" {
@@ -177,6 +224,12 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
             }
             "x-cstp-dpd" => dpd = interval(value)?,
             "x-cstp-keepalive" => keepalive = interval(value)?,
+            #[cfg(feature = "dtls")]
+            name if offer.is_some()
+                && (name.starts_with("x-dtls-") || name.starts_with("x-dtls12-")) =>
+            {
+                dtls_headers.push(name, value)?;
+            }
             _ => {}
         }
     }
@@ -200,6 +253,11 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
         },
         dpd,
         keepalive,
+        #[cfg(feature = "dtls")]
+        dtls: match offer {
+            Some(offer) => dtls_headers.negotiate(offer, mtu, address6.is_some()),
+            None => Ok(None),
+        },
     })
 }
 

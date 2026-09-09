@@ -18,14 +18,14 @@ A high-performance Rust implementation of the [mihomo](https://github.com/MetaCu
 - **SOCKS5** -- SOCKS5 outbound proxy with optional TLS and auth
 - **Snell** -- v3/v4/v5 TCP, UDP-over-TCP, optional HTTP/TLS obfs; v4/v5 connection reuse
 - **AnyTLS** -- AnyTLS outbound (`anytls` feature; in the `full` bundle, so the release binaries include it)
-- **OpenConnect / AnyConnect** -- CSTP/TLS with Cookie or password authentication, IPv4/IPv6 TCP/UDP, VPN DNS and bounded reconnect (`openconnect` opt-in feature; [configuration and current limits](docs/openconnect.md))
+- **OpenConnect / AnyConnect** -- CSTP/TLS with Cookie or password authentication, IPv4/IPv6 TCP/UDP, VPN DNS and bounded reconnect (`openconnect` opt-in feature). Optional OpenSSL DTLS 1.2 backend via `openconnect-dtls`; fault/performance acceptance is in progress ([configuration and current limits](docs/openconnect.md))
 - **Direct** -- Direct connection to destination
 - **Reject** -- Drop connections (with configurable behavior)
 
 ### TLS & Privacy
 - **ECH (Encrypted Client Hello)** -- DNS-based ECH config fetching from HTTPS/SVCB records; BoringSSL backend (`boring-tls` feature)
 - **uTLS Fingerprinting** -- Chrome, Firefox, Safari, iOS, Android, Edge profiles to bypass TLS fingerprint detection
-- **BoringSSL** is the single crypto library for the whole app. Every proxy handshake, health check, DoT/DoH upstream, internal HTTP(S) fetch (uTLS fingerprints and ECH included), and the Hysteria2 QUIC transport link one vendored BoringSSL. rustls is not used at runtime at all
+- **BoringSSL** backs TLS and QUIC in the default app build. Proxy handshakes, health checks, DoT/DoH upstreams, internal HTTP(S) fetches (uTLS fingerprints and ECH included), and Hysteria2 link one vendored BoringSSL. The optional OpenConnect DTLS backend dynamically loads an isolated OpenSSL 3 library. rustls is not used at runtime
 
 ### Proxy Groups
 - **Selector** -- Manual proxy selection via REST API or web UI
