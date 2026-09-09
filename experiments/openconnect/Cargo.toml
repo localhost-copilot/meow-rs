@@ -1,0 +1,16 @@
+[package]
+name = "meow-openconnect-probe"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+license = "MIT"
+
+# Keep experimental dependencies out of production builds and the workspace lockfile.
+[workspace]
+
+[dependencies]
+smoltcp = { version = "=0.12.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-udp"] }
+openssl = "=0.10.81"
+openssl-sys = "=0.9.117"
+foreign-types = "0.3"
