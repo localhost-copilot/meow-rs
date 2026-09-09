@@ -169,6 +169,22 @@ UDP 不通能按策略退出、双向应用数据能交换。记录 OpenSSL/绑�
 DTLS 开发完成前仅接受 `off`；完成后默认目标为 `auto`。
 控制 TLS 连接和会话心跳必须按协议维护，不能因 DTLS 就绪就关闭控制连接。
 
+### 阶段 3 接入验证进展（2026-09-09）
+
+已为实际控制 TLS stream 增加 exporter 入口，并用独立 rustls 服务端验证
+TLS 1.2 / 1.3 下两端导出结果一致、不同连接密钥不同。完整 BoringSSL TLS
+测试 22 项通过；transport 全 feature / all-targets Clippy 通过。
+
+产品同时使用 BoringSSL，阶段 0 的独立 OpenSSL 实验没有覆盖两者共存。
+直接同时依赖当前两个 bindings 的最小程序在 macOS 上链接失败，因此不能直接
+给产品添加 OpenSSL bindings 就视为集成完成。新增
+[同进程共存探针](../../experiments/openconnect/coexistence/README.md)：
+动态加载 OpenSSL 3 后，macOS 上 1,000 次交错创建与释放上下文/会话通过。
+这不证明完整握手或其他平台支持；后端符号隔离和打包方案仍需完成验证。
+
+阶段 3 尚未完成：生产 DTLS 驱动、现代 PSK/注入恢复互通、三种模式、回退与切换、
+丢包/UDP 阻断测试，以及真实 ocserv Docker 的 TLS/DTLS benchmark 均仍待交付。
+
 ## 7. 配置与 Cargo 接入
 
 以下展示阶段 1 的核心配置；构建方式、完整示例和字段限制见
