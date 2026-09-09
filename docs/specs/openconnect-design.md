@@ -1,12 +1,13 @@
 # OpenConnect 出站设计
 
-状态：设计草案，尚未实现或完成协议互通验证。
+状态：阶段 1 已实现 Cookie / CSTP/TLS / IPv4 TCP/UDP；后续阶段仍为设计。
 
 日期：2026-09-09
 
 阶段 0 已完成技术实验，见 [验证结果与 API 缺口](openconnect-phase-zero-results.md)。
 现代 DTLS 1.2 的 PSK 和注入恢复已验证；旧 Cisco 模式有已定位的参考网关互通失败，
-尚不列入已验证支持范围。下文仍描述完整目标架构，不代表其余阶段已经实现。
+尚不列入已验证支持范围。阶段 1 的接口、限制和复现命令见 [使用说明](../openconnect.md)。
+下文仍描述完整目标架构，不代表 DTLS、重连、VPN DNS 等后续阶段已经实现。
 
 ## 1. 设计决策
 
@@ -170,7 +171,8 @@ DTLS 开发完成前仅接受 `off`；完成后默认目标为 `auto`。
 
 ## 7. 配置与 Cargo 接入
 
-以下是拟议配置，不是当前可运行示例。占位 Cookie 需要替换，meow 不因此新增环境变量插值语义。
+以下展示阶段 1 的核心配置；构建方式、完整示例和字段限制见
+[使用说明](../openconnect.md)。占位 Cookie 需要替换，meow 不因此新增环境变量插值语义。
 
 ```yaml
 proxies:
@@ -190,8 +192,8 @@ rules:
 
 第一阶段支持 `name`、`server`、`port`、`protocol`、`cookie`、`server-name`、
 CA 配置、握手超时、MTU、IPv6 禁用选项及 `dtls-mode: off`。
-字段优先沿用参考 mihomo 命名；实现时明确 server 接受的主机名/URL 格式、
-路径与 port 冲突规则、CA 是路径还是内容，避免模糊解析。
+字段优先沿用参考 mihomo 命名。阶段 1 的 `server` 接受裸主机名或 IP，
+不接受 URL；端口由 `port` 指定。`ca` 是 PEM 文件路径，相对路径按进程工作目录解析。
 Cookie 禁止 CR/LF/NUL，默认验证证书及主机名，日志和 Debug 输出不得暴露 Cookie 或密钥。
 
 后续增加用户名密码、authgroup、VPN DNS、DTLS 参数；MFA、客户端证书、

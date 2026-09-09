@@ -11,6 +11,8 @@ pub mod health;
 pub mod http_adapter;
 #[cfg(feature = "mux")]
 pub mod mux;
+#[cfg(feature = "openconnect")]
+pub mod openconnect_adapter;
 pub mod reject;
 pub mod socks5_adapter;
 pub mod stream_conn;

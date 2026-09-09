@@ -21,6 +21,7 @@ vless-vision = ["vless", "meow-proxy/vless-vision"]
 vless-encryption = ["vless", "meow-proxy/vless-encryption"]
 vmess = ["meow-proxy/vmess"]
 anytls = ["meow-proxy/anytls"]
+openconnect = ["meow-proxy/openconnect", "dep:rustls-pemfile"]
 hysteria2 = ["meow-proxy/hysteria2"]
 snell = ["meow-proxy/snell"]
 # Compatibility alias: BoringSSL is the only TLS backend now, so this is a
@@ -57,6 +58,7 @@ hickory-proto = { workspace = true }
 smol_str = { workspace = true }
 url = "2"
 httparse = "1"
+rustls-pemfile = { version = "2", optional = true }
 # Optional: only compiled when the `external-ui-download` feature is enabled.
 # `deflate` is the only codec GitHub release zips use; skip the heavier ones.
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }

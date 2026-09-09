@@ -88,6 +88,12 @@ jobs:
       - name: Build
         run: cargo build --tests
 
+      - name: OpenConnect CSTP and raw IP end-to-end (local fixtures only)
+        run: |
+          cargo test -p meow-netstack -p meow-openconnect
+          cargo test -p meow-config --features openconnect --test openconnect_config
+          cargo test -p meow-app --features openconnect --test openconnect_e2e
+
       # One workspace-scoped invocation for every default-features test
       # target. A single invocation keeps a single feature-resolution scope,
       # so every target reuses the `cargo build --tests` artifacts instead of

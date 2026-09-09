@@ -1,0 +1,451 @@
+use crate::{closed, device::RawIp, Flow, Packet, MAX_SOCKETS, SOCKET_BUFFER};
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
+use smoltcp::socket::{tcp, udp};
+use smoltcp::time::{Duration as SmolDuration, Instant as SmolInstant};
+use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
+use std::collections::VecDeque;
+use std::future::poll_fn;
+use std::io;
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
+use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
+
+pub(crate) enum Command {
+    Tcp {
+        destination: SocketAddrV4,
+        bridge: DuplexStream,
+        flow: Arc<Flow>,
+        ready: oneshot::Sender<io::Result<()>>,
+    },
+    Udp {
+        outgoing: mpsc::Receiver<Packet>,
+        incoming: mpsc::Sender<Packet>,
+        flow: Arc<Flow>,
+        ready: oneshot::Sender<io::Result<u16>>,
+    },
+}
+
+struct Tcp {
+    bridge: DuplexStream,
+    ready: Option<oneshot::Sender<io::Result<()>>>,
+    local_eof: bool,
+    remote_eof: bool,
+    close_deadline: Option<Instant>,
+}
+
+struct Udp {
+    outgoing: mpsc::Receiver<Packet>,
+    incoming: mpsc::Sender<Packet>,
+    pending: Option<Packet>,
+}
+
+enum Socket {
+    Tcp(Tcp),
+    Udp(Udp),
+    RetiringTcp,
+}
+struct Entry {
+    handle: SocketHandle,
+    port: u16,
+    flow: Arc<Flow>,
+    socket: Socket,
+}
+
+pub(crate) struct Driver {
+    iface: Interface,
+    device: RawIp,
+    sockets: SocketSet<'static>,
+    entries: Vec<Entry>,
+    commands: mpsc::Receiver<Command>,
+    wake: Arc<Notify>,
+    next_port: u16,
+}
+
+impl Driver {
+    pub fn new(
+        address: Ipv4Addr,
+        mtu: u16,
+        commands: mpsc::Receiver<Command>,
+        wake: Arc<Notify>,
+    ) -> Self {
+        let mut device = RawIp {
+            incoming: VecDeque::new(),
+            outgoing: VecDeque::new(),
+            mtu: usize::from(mtu),
+        };
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = rand::random();
+        let mut iface = Interface::new(config, &mut device, SmolInstant::ZERO);
+        iface.update_ip_addrs(|addresses| {
+            addresses
+                .push(IpCidr::new(IpAddress::Ipv4(address), 32))
+                .expect("one address fits");
+        });
+        // An IP-only link has no ARP gateway. The route selects this tunnel;
+        // the destination in emitted IP packets remains the remote endpoint.
+        iface
+            .routes_mut()
+            .add_default_ipv4_route(address)
+            .expect("one route fits");
+        Self {
+            iface,
+            device,
+            sockets: SocketSet::new(vec![]),
+            entries: vec![],
+            commands,
+            wake,
+            next_port: 49152,
+        }
+    }
+
+    fn register(&mut self, command: Command) {
+        if self.entries.len() >= MAX_SOCKETS {
+            let error =
+                || io::Error::new(io::ErrorKind::OutOfMemory, "userspace socket limit reached");
+            match command {
+                Command::Tcp { ready, .. } => {
+                    let _ = ready.send(Err(error()));
+                }
+                Command::Udp { ready, .. } => {
+                    let _ = ready.send(Err(error()));
+                }
+            }
+            return;
+        }
+        while self
+            .entries
+            .iter()
+            .any(|entry| entry.port == self.next_port)
+        {
+            self.next_port = self.next_port.checked_add(1).unwrap_or(49152);
+        }
+        let port = self.next_port;
+        self.next_port = self.next_port.checked_add(1).unwrap_or(49152);
+        let (handle, flow, socket) = match command {
+            Command::Tcp {
+                destination,
+                bridge,
+                flow,
+                ready,
+            } => {
+                let mut socket = tcp::Socket::new(
+                    tcp::SocketBuffer::new(vec![0; SOCKET_BUFFER]),
+                    tcp::SocketBuffer::new(vec![0; SOCKET_BUFFER]),
+                );
+                socket.set_timeout(Some(SmolDuration::from_secs(30)));
+                socket.set_nagle_enabled(false);
+                if socket
+                    .connect(
+                        self.iface.context(),
+                        (IpAddress::Ipv4(*destination.ip()), destination.port()),
+                        port,
+                    )
+                    .is_err()
+                {
+                    let _ = ready.send(Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "userspace TCP connect rejected",
+                    )));
+                    return;
+                }
+                (
+                    self.sockets.add(socket),
+                    flow,
+                    Socket::Tcp(Tcp {
+                        bridge,
+                        ready: Some(ready),
+                        local_eof: false,
+                        remote_eof: false,
+                        close_deadline: None,
+                    }),
+                )
+            }
+            Command::Udp {
+                outgoing,
+                incoming,
+                flow,
+                ready,
+            } => {
+                let mut socket = udp::Socket::new(
+                    udp::PacketBuffer::new(
+                        vec![udp::PacketMetadata::EMPTY; 32],
+                        vec![0; SOCKET_BUFFER],
+                    ),
+                    udp::PacketBuffer::new(
+                        vec![udp::PacketMetadata::EMPTY; 32],
+                        vec![0; SOCKET_BUFFER],
+                    ),
+                );
+                if socket.bind(port).is_err() {
+                    let _ = ready.send(Err(closed()));
+                    return;
+                }
+                if ready.send(Ok(port)).is_err() {
+                    return;
+                }
+                (
+                    self.sockets.add(socket),
+                    flow,
+                    Socket::Udp(Udp {
+                        outgoing,
+                        incoming,
+                        pending: None,
+                    }),
+                )
+            }
+        };
+        self.entries.push(Entry {
+            handle,
+            port,
+            flow,
+            socket,
+        });
+    }
+
+    pub async fn run(
+        &mut self,
+        mut incoming: mpsc::Receiver<Vec<u8>>,
+        outgoing: mpsc::Sender<Vec<u8>>,
+        cancel: CancellationToken,
+    ) -> io::Result<()> {
+        let epoch = Instant::now();
+        loop {
+            let now = SmolInstant::from_millis(epoch.elapsed().as_millis() as i64);
+            self.iface.poll(now, &mut self.device, &mut self.sockets);
+            let delay = if self.device.outgoing.len() >= 64 {
+                Duration::from_secs(1)
+            } else {
+                self.iface
+                    .poll_delay(now, &self.sockets)
+                    .map_or(Duration::from_secs(1), |n| {
+                        Duration::from_millis(n.total_millis()).min(Duration::from_secs(1))
+                    })
+            };
+            let wake = Arc::clone(&self.wake);
+            // All bridge and channel wakers are registered in this same select.
+            // A full packet sink never blocks command handling or tunnel reads.
+            tokio::select! {
+                _ = cancel.cancelled() => return Ok(()),
+                _ = wake.notified() => {},
+                _ = tokio::time::sleep(delay) => {},
+                command = self.commands.recv() => self.register(command.ok_or_else(closed)?),
+                packet = incoming.recv(), if self.device.incoming.len() < 64 => {
+                    let packet = packet.ok_or_else(closed)?;
+                    if packet.len() > self.device.mtu { return Err(io::Error::new(io::ErrorKind::InvalidData, "incoming IP packet exceeds MTU")); }
+                    self.device.incoming.push_back(packet);
+                },
+                permit = outgoing.reserve(), if !self.device.outgoing.is_empty() => {
+                    permit.map_err(|_| closed())?.send(self.device.outgoing.pop_front().expect("nonempty queue"));
+                },
+                _ = poll_fn(|cx| Self::pump(&mut self.entries, &mut self.sockets, cx)) => {},
+            }
+        }
+    }
+
+    fn pump(
+        entries: &mut Vec<Entry>,
+        sockets: &mut SocketSet<'static>,
+        cx: &mut Context<'_>,
+    ) -> Poll<()> {
+        let mut progress = false;
+        entries.retain_mut(|entry| {
+            let mut retain = !entry.flow.cancel.is_cancelled();
+            if matches!(entry.socket, Socket::RetiringTcp) {
+                // smoltcp clears the endpoint after dispatching the RST. Keep
+                // this tombstone across a full packet sink until that happens.
+                retain = sockets
+                    .get::<tcp::Socket>(entry.handle)
+                    .remote_endpoint()
+                    .is_some();
+            }
+            if retain {
+                retain = match &mut entry.socket {
+                    Socket::Tcp(tcp) => pump_tcp(
+                        tcp,
+                        sockets.get_mut(entry.handle),
+                        &entry.flow,
+                        cx,
+                        &mut progress,
+                    ),
+                    Socket::Udp(udp) => {
+                        pump_udp(udp, sockets.get_mut(entry.handle), cx, &mut progress)
+                    }
+                    Socket::RetiringTcp => true,
+                };
+            }
+            if !retain {
+                if matches!(entry.socket, Socket::Tcp(_)) {
+                    let socket = sockets.get_mut::<tcp::Socket>(entry.handle);
+                    if socket.remote_endpoint().is_some() {
+                        socket.abort();
+                        // Drop the bridge now to wake readers; only the protocol
+                        // socket remains until its reset reaches the packet queue.
+                        entry.socket = Socket::RetiringTcp;
+                        progress = true;
+                        return true;
+                    }
+                }
+                sockets.remove(entry.handle);
+                progress = true;
+            }
+            retain
+        });
+        if progress {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+fn pump_tcp(
+    entry: &mut Tcp,
+    socket: &mut tcp::Socket<'_>,
+    flow: &Flow,
+    cx: &mut Context<'_>,
+    progress: &mut bool,
+) -> bool {
+    if entry.ready.is_some() {
+        if matches!(
+            socket.state(),
+            tcp::State::Established | tcp::State::CloseWait
+        ) {
+            socket.set_timeout(None);
+            socket.set_keep_alive(Some(SmolDuration::from_secs(30)));
+            if entry
+                .ready
+                .take()
+                .expect("pending connect")
+                .send(Ok(()))
+                .is_err()
+            {
+                socket.abort();
+                return false;
+            }
+            *progress = true;
+        } else if socket.state() == tcp::State::Closed {
+            let _ = entry
+                .ready
+                .take()
+                .expect("pending connect")
+                .send(Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    "userspace TCP handshake failed",
+                )));
+            return false;
+        } else {
+            return true;
+        }
+    }
+    if socket.state() == tcp::State::Closed {
+        if !entry.remote_eof {
+            *flow.failure.lock() = Some("userspace TCP connection reset".to_owned());
+        }
+        return false;
+    }
+    if entry
+        .close_deadline
+        .is_some_and(|deadline| Instant::now() >= deadline)
+    {
+        *flow.failure.lock() = Some("userspace TCP close timed out".to_owned());
+        socket.abort();
+        return false;
+    }
+    if !entry.local_eof && socket.can_send() {
+        let capacity = (socket.send_capacity() - socket.send_queue()).min(8192);
+        let mut scratch = [0; 8192];
+        let mut buffer = ReadBuf::new(&mut scratch[..capacity]);
+        match Pin::new(&mut entry.bridge).poll_read(cx, &mut buffer) {
+            Poll::Ready(Ok(())) => {
+                if buffer.filled().is_empty() {
+                    socket.close();
+                    entry.local_eof = true;
+                    entry.close_deadline = Some(Instant::now() + Duration::from_secs(30));
+                } else if socket.send_slice(buffer.filled()).is_err() {
+                    socket.abort();
+                    return false;
+                }
+                *progress = true;
+            }
+            Poll::Ready(Err(_)) => {
+                socket.abort();
+                return false;
+            }
+            Poll::Pending => {}
+        }
+    }
+    let mut broken = false;
+    if socket.can_recv() {
+        let _ = socket.recv(
+            |data| match Pin::new(&mut entry.bridge).poll_write(cx, data) {
+                Poll::Ready(Ok(n)) if n > 0 => {
+                    *progress = true;
+                    (n, ())
+                }
+                Poll::Ready(_) => {
+                    broken = true;
+                    (0, ())
+                }
+                Poll::Pending => (0, ()),
+            },
+        );
+    }
+    if broken {
+        socket.abort();
+        return false;
+    }
+    if !socket.may_recv()
+        && !entry.remote_eof
+        && Pin::new(&mut entry.bridge).poll_shutdown(cx).is_ready()
+    {
+        entry.remote_eof = true;
+        *progress = true;
+    }
+    true
+}
+
+fn pump_udp(
+    entry: &mut Udp,
+    socket: &mut udp::Socket<'_>,
+    cx: &mut Context<'_>,
+    progress: &mut bool,
+) -> bool {
+    if entry.pending.is_none() {
+        match entry.outgoing.poll_recv(cx) {
+            Poll::Ready(Some(packet)) => {
+                entry.pending = Some(packet);
+                *progress = true;
+            }
+            Poll::Ready(None) => return false,
+            Poll::Pending => {}
+        }
+    }
+    if let Some((bytes, target)) = entry.pending.as_ref() {
+        if socket
+            .send_slice(bytes, (IpAddress::Ipv4(*target.ip()), target.port()))
+            .is_ok()
+        {
+            entry.pending = None;
+            *progress = true;
+        }
+    }
+    // UDP has no backpressure to its peer. Drop when the bounded application
+    // inbox is full rather than stalling every TCP connection on this tunnel.
+    while socket.can_recv() {
+        if let Ok((packet, meta)) = socket.recv() {
+            let IpAddress::Ipv4(address) = meta.endpoint.addr;
+            let _ = entry.incoming.try_send((
+                packet.to_vec(),
+                SocketAddrV4::new(address, meta.endpoint.port),
+            ));
+            *progress = true;
+        }
+    }
+    true
+}
