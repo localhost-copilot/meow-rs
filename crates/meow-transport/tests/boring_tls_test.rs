@@ -25,6 +25,62 @@ use meow_transport::{
 };
 use support::loopback::{gen_cert, install_crypto_provider, spawn_tls_server, ServerOptions};
 
+#[tokio::test]
+async fn exporter_matches_independent_peer_and_is_connection_bound() {
+    use meow_transport::tls::export_keying_material;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    install_crypto_provider();
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        let (cert, key, _, _) = gen_cert(&["localhost"]);
+        let server_config = rustls::ServerConfig::builder_with_protocol_versions(&[version])
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut tls = acceptor.accept(tcp).await.unwrap();
+                let key = tls
+                    .get_ref()
+                    .1
+                    .export_keying_material([0u8; 32], b"EXPORTER-openconnect-psk", None)
+                    .unwrap();
+                tls.write_all(&key).await.unwrap();
+            }
+        });
+        let layer = TlsLayer::new(&TlsConfig {
+            additional_roots: vec![cert.to_vec()],
+            ..TlsConfig::new("localhost")
+        })
+        .unwrap();
+        let mut previous = None;
+        for _ in 0..2 {
+            let tcp = TcpStream::connect(addr).await.unwrap();
+            let mut tls = layer.connect(Box::new(tcp)).await.unwrap();
+            let mut key = [0u8; 32];
+            export_keying_material(tls.as_mut(), &mut key, "EXPORTER-openconnect-psk", None)
+                .unwrap();
+            let mut peer_key = [0u8; 32];
+            tls.read_exact(&mut peer_key).await.unwrap();
+            assert_eq!(key, peer_key);
+            if let Some(previous) = previous {
+                assert_ne!(key, previous);
+            }
+            previous = Some(key);
+        }
+        server.await.unwrap();
+    }
+    let (mut plain, _) = tokio::io::duplex(64);
+    assert!(
+        export_keying_material(&mut plain, &mut [0u8; 32], "EXPORTER-openconnect-psk", None)
+            .is_err()
+    );
+}
+
 // ─── ClientHello capturer ─────────────────────────────────────────────────────
 
 /// Transparent stream wrapper that saves the first poll_write payload (the TLS
