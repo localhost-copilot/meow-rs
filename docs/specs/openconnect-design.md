@@ -1,13 +1,13 @@
 # OpenConnect 出站设计
 
-状态：阶段 1 已实现 Cookie / CSTP/TLS / IPv4 TCP/UDP；后续阶段仍为设计。
+状态：阶段 1、2 已完成；DTLS 等后续阶段仍为设计。
 
 日期：2026-09-09
 
 阶段 0 已完成技术实验，见 [验证结果与 API 缺口](openconnect-phase-zero-results.md)。
 现代 DTLS 1.2 的 PSK 和注入恢复已验证；旧 Cisco 模式有已定位的参考网关互通失败，
-尚不列入已验证支持范围。阶段 1 的接口、限制和复现命令见 [使用说明](../openconnect.md)。
-下文仍描述完整目标架构，不代表 DTLS、重连、VPN DNS 等后续阶段已经实现。
+尚不列入已验证支持范围。当前接口、限制和复现命令见 [使用说明](../openconnect.md)。
+下文仍描述完整目标架构；DTLS、MFA、split-DNS 等后续能力尚未实现。
 
 ## 1. 设计决策
 
@@ -218,6 +218,27 @@ OpenSSL 依赖进一步由 `openconnect-dtls` 控制，并让其隐含 `openconn
 TLS 闭环无需等待旧 Cisco 兼容性问题解决。握手实验不可用时记录具体原因，
 再决定补 FFI、采用 fork 或收窄首发兼容范围。
 
+### 阶段 2 实现说明
+
+单个 supervisor 负责节点的共享初始化、就绪等待和有界重连，不持有 adapter 的强引用。
+每次建立会话递增 generation ID，并创建独立栈、包队列、网络参数和 DNS 缓存；
+旧代次通道与新代次之间没有转发路径。adapter 释放停止监督任务，已有业务连接
+仍可持有当前会话，最后一个使用者释放时关闭数据通道。
+
+用户名密码走 XML 表单，可选 authgroup；HTTP 重定向、HTML 登录、MFA、设备检查
+和客户端证书不属于这次实现。解析使用有大小和节点数量限制的 XML 库，不加载外部实体。
+重连最多连续尝试 5 次，使用 1/2/4/8 秒退避；短命会话也计入失败，避免循环重连。
+
+IPv6 通过 `ipv6-disabled: false` 启用，分配结果可为纯 IPv6 或双栈，要求有效 MTU ≥1280。
+VPN DNS 优先使用显式 `dns`，否则使用网关下发地址；查询和 TCP 回退都通过本代栈。
+未取得有效 DNS 配置或查询失败时不回退本地解析。IP 规则为完成路由而要求的解析
+仍走现有规则解析路径，建议企业域名使用靠前的域名规则。
+
+UDP 原有 NAT 键需要目标 IP，因此新增出站解析接口，并保留提供 DNS 答案的代理组成员。
+Tunnel 与 SOCKS5 UDP 共用该路径，避免解析后重新匹配 IP 规则或重新选择成员而改变出站。
+实际 UDP socket 在自己的代次中重新确认目标，处理 DNS 查询与重连之间的竞争。
+现有 `dial_tcp` / `dial_udp` 的数据接口保持不变。
+
 ## 9. 测试与完成标准
 
 自动化测试以本地模拟网关和 IP 层 TCP/UDP 测试端点为主，不需要真实节点秘密。
@@ -246,6 +267,7 @@ Cookie、密码、PSK、私有节点和抓包中的秘密不得提交。
 - [OpenConnect 技术说明](https://www.infradead.org/openconnect/technical.html)
 - [OpenConnect 协议草案：PSK 与旧式 DTLS 恢复](https://github.com/openconnect/protocol/blob/master/draft-openconnect.xml)
 - [OpenConnect DTLS 实现：历史握手说明](https://gitlab.com/openconnect/openconnect/-/blob/master/dtls.c)
+- [OpenConnect XML 认证格式说明](https://github.com/openconnect/openconnect/blob/master/auth.c)
 - [OpenSSL Rust DTLS method](https://docs.rs/openssl/latest/openssl/ssl/struct.SslMethod.html)
 - [OpenSSL Rust session](https://docs.rs/openssl/latest/openssl/ssl/struct.SslSession.html)
 - [OpenSSL Rust set_session](https://docs.rs/openssl/latest/openssl/ssl/struct.Ssl.html#method.set_session)

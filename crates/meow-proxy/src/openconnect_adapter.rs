@@ -1,4 +1,4 @@
-//! Shared, cookie-authenticated AnyConnect CSTP/TLS outbound.
+//! Shared AnyConnect CSTP/TLS outbound with authentication and isolated reconnect generations.
 
 use async_trait::async_trait;
 use meow_common::{
@@ -18,26 +18,36 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-/// Cookie and TLS options are intentionally not Debug-printable.
+pub use meow_openconnect::auth::Credentials;
+
+mod dns;
+
+/// Authentication and TLS options are intentionally not Debug-printable.
 pub struct Options {
     pub server: String,
     pub port: u16,
-    pub cookie: String,
+    pub cookie: Option<String>,
+    pub credentials: Option<Credentials>,
     pub server_name: String,
     pub additional_roots: Vec<Vec<u8>>,
     pub mtu: u16,
     pub handshake_timeout: Duration,
     pub udp: bool,
+    pub ipv6: bool,
+    pub remote_dns_resolve: bool,
+    pub dns: Vec<SocketAddr>,
 }
 
 struct Parameters {
     options: Options,
     tls: TlsLayer,
-    request: meow_openconnect::Options,
 }
 
 struct Session {
+    generation: u64,
     stack: Stack,
+    network: meow_openconnect::NetworkConfig,
+    dns: dns::Resolver,
     cancel: CancellationToken,
 }
 impl Drop for Session {
@@ -49,8 +59,7 @@ impl Drop for Session {
 type SessionResult = std::result::Result<Arc<Session>, Arc<str>>;
 enum Init {
     Idle,
-    Starting(watch::Receiver<Option<SessionResult>>),
-    Done(SessionResult),
+    Running(watch::Receiver<Option<SessionResult>>),
 }
 struct Shared {
     init: Mutex<Init>,
@@ -95,10 +104,37 @@ impl OpenConnectAdapter {
         };
         let request = meow_openconnect::Options {
             authority: address.clone(),
-            cookie: options.cookie.clone(),
+            cookie: options
+                .cookie
+                .clone()
+                .unwrap_or_else(|| "authenticated-cookie".into()),
             mtu: options.mtu,
+            ipv6: options.ipv6,
         };
         request.validate()?;
+        if options.dns.len() > 16
+            || !options.dns.is_empty() && !options.remote_dns_resolve
+            || options.dns.iter().any(|server| {
+                server.port() == 0 || server.ip().is_unspecified() || server.ip().is_multicast()
+                    || matches!(server.ip(), std::net::IpAddr::V4(ip) if ip.is_broadcast())
+                    || matches!(server, SocketAddr::V6(addr) if addr.scope_id() != 0 || addr.ip().to_ipv4_mapped().is_some())
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid VPN DNS servers or remote-dns-resolve is disabled",
+            ));
+        }
+        match (&options.cookie, &options.credentials) {
+            (Some(_), None) => {}
+            (None, Some(credentials)) => credentials.validate()?,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "OpenConnect requires either cookie or username/password",
+                ))
+            }
+        }
         let tls = TlsLayer::new(&TlsConfig {
             additional_roots: options.additional_roots.clone(),
             alpn: vec!["http/1.1".into()],
@@ -108,11 +144,7 @@ impl OpenConnectAdapter {
         Ok(Self {
             name: name.to_owned(),
             address,
-            parameters: Arc::new(Parameters {
-                options,
-                tls,
-                request,
-            }),
+            parameters: Arc::new(Parameters { options, tls }),
             shared: Arc::new(Shared {
                 init: Mutex::new(Init::Idle),
                 cancel: CancellationToken::new(),
@@ -125,27 +157,19 @@ impl OpenConnectAdapter {
         let mut receiver = {
             let mut init = self.shared.init.lock();
             match &*init {
-                Init::Done(result) => return usable(result.clone()),
-                Init::Starting(receiver) => receiver.clone(),
+                Init::Running(receiver) => receiver.clone(),
                 Init::Idle => {
                     let (sender, receiver) = watch::channel(None);
-                    *init = Init::Starting(receiver.clone());
+                    *init = Init::Running(receiver.clone());
                     let parameters = Arc::clone(&self.parameters);
-                    let owner = Arc::downgrade(&self.shared);
                     let cancel = self.shared.cancel.clone();
-                    // Initialization belongs to the adapter, not the first waiter.
-                    // Its task holds only a Weak back-reference, so cancellation or
-                    // dropping all adapters cannot create a permanent task cycle.
+                    // The supervisor belongs to the adapter, not a waiting dial.
+                    // It never owns Shared; dropping the adapter cancels supervision
+                    // while application connections can retain their current session.
                     tokio::spawn(async move {
-                        let result = tokio::select! {
-                            _ = cancel.cancelled() => return,
-                            result = tokio::time::timeout(parameters.options.handshake_timeout, establish(&parameters)) => {
-                                result.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "OpenConnect handshake timed out")).and_then(|r| r)
-                            },
-                        }.map_err(|e| Arc::<str>::from(e.to_string()));
-                        sender.send_replace(Some(result.clone()));
-                        if let Some(owner) = owner.upgrade() {
-                            *owner.init.lock() = Init::Done(result);
+                        tokio::select! {
+                            _ = cancel.cancelled() => {},
+                            _ = supervise(&parameters, sender) => {},
                         }
                     });
                     receiver
@@ -154,7 +178,10 @@ impl OpenConnectAdapter {
         };
         loop {
             if let Some(result) = receiver.borrow().clone() {
-                return usable(result);
+                let session = result.map_err(|error| MeowError::Proxy(error.to_string()))?;
+                if !session.stack.is_closed() {
+                    return Ok(session);
+                }
             }
             receiver
                 .changed()
@@ -164,17 +191,74 @@ impl OpenConnectAdapter {
     }
 }
 
-fn usable(result: SessionResult) -> Result<Arc<Session>> {
-    let session = result.map_err(|e| MeowError::Proxy(e.to_string()))?;
-    if session.stack.is_closed() {
-        return Err(MeowError::Proxy(
-            "OpenConnect session closed; reload the node to reconnect".into(),
-        ));
+async fn supervise(parameters: &Parameters, sender: watch::Sender<Option<SessionResult>>) {
+    let mut generation = 0u64;
+    let mut failures = 0u32;
+    loop {
+        if failures > 0 {
+            tokio::time::sleep(Duration::from_secs(1 << (failures - 1).min(4))).await;
+        }
+        generation += 1;
+        let result = tokio::time::timeout(
+            parameters.options.handshake_timeout,
+            establish(parameters, generation),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "OpenConnect handshake timed out"))
+        .and_then(|result| result);
+        match result {
+            Ok(session) => {
+                let started = tokio::time::Instant::now();
+                tracing::debug!(generation = session.generation, network = ?session.network, "OpenConnect generation ready");
+                sender.send_replace(Some(Ok(Arc::clone(&session))));
+                session.stack.closed().await;
+                // Every generation owns new channels and a new stack. Retired
+                // sockets keep only the failed old generation, never the new sink.
+                sender.send_replace(None);
+                session.cancel.cancel();
+                failures = if started.elapsed() >= Duration::from_secs(30) {
+                    1
+                } else {
+                    failures + 1
+                };
+                if failures >= 5 {
+                    sender.send_replace(Some(Err(
+                        "OpenConnect reconnect limit reached; reload node to retry".into(),
+                    )));
+                    return;
+                }
+            }
+            Err(error) => {
+                failures += 1;
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::PermissionDenied
+                        | io::ErrorKind::InvalidData
+                        | io::ErrorKind::InvalidInput
+                        | io::ErrorKind::Unsupported
+                ) || failures >= 5
+                {
+                    let reason = if failures >= 5 {
+                        format!(
+                            "OpenConnect failed after 5 attempts; reload node to retry: {error}"
+                        )
+                    } else {
+                        error.to_string()
+                    };
+                    sender.send_replace(Some(Err(reason.into())));
+                    return;
+                }
+                tracing::debug!(
+                    generation,
+                    failures,
+                    "OpenConnect transient failure; reconnect pending"
+                );
+            }
+        }
     }
-    Ok(session)
 }
 
-async fn establish(parameters: &Parameters) -> io::Result<Arc<Session>> {
+async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<Session>> {
     let tcp =
         meow_common::connect_tcp_host(&parameters.options.server, parameters.options.port).await?;
     tcp.set_nodelay(true)?;
@@ -182,16 +266,71 @@ async fn establish(parameters: &Parameters) -> io::Result<Arc<Session>> {
         .tls
         .connect(Box::new(tcp))
         .await
-        .map_err(|e| io::Error::other(format!("OpenConnect TLS: {e}")))?;
-    let connection = meow_openconnect::connect(tls, &parameters.request).await?;
+        .map_err(|e| match e {
+            meow_transport::TransportError::Io(error) => error,
+            // TLS verification/configuration errors cannot be repaired by retrying.
+            _ => io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("OpenConnect TLS: {e}"),
+            ),
+        })?;
+    let authority = if parameters.options.server.contains(':') {
+        format!(
+            "[{}]:{}",
+            parameters.options.server, parameters.options.port
+        )
+    } else {
+        format!("{}:{}", parameters.options.server, parameters.options.port)
+    };
+    let (tls, cookie) = if let Some(credentials) = &parameters.options.credentials {
+        meow_openconnect::auth::authenticate(tls, &authority, credentials).await?
+    } else {
+        (
+            tokio::io::BufReader::new(tls),
+            parameters
+                .options
+                .cookie
+                .clone()
+                .expect("validated authentication"),
+        )
+    };
+    let connection = meow_openconnect::connect(
+        tls,
+        &meow_openconnect::Options {
+            authority,
+            cookie,
+            mtu: parameters.options.mtu,
+            ipv6: parameters.options.ipv6,
+        },
+    )
+    .await?;
     let (to_stack, incoming) = mpsc::channel(64);
     let (outgoing, from_stack) = mpsc::channel(64);
-    let stack = Stack::new(
+    let stack = Stack::with_addresses(
         connection.network.address,
+        connection.network.address6,
         connection.network.mtu,
         incoming,
         outgoing,
     )?;
+    let network = connection.network.clone();
+    let servers = if parameters.options.dns.is_empty() {
+        network
+            .dns
+            .iter()
+            .map(|ip| SocketAddr::new(*ip, 53))
+            .collect()
+    } else {
+        parameters.options.dns.clone()
+    };
+    if parameters.options.remote_dns_resolve
+        && !servers.iter().any(|server| stack.supports(server.ip()))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "no usable VPN DNS server; local fallback is disabled",
+        ));
+    }
     let cancel = CancellationToken::new();
     let worker_cancel = cancel.clone();
     tokio::spawn(async move {
@@ -199,23 +338,29 @@ async fn establish(parameters: &Parameters) -> io::Result<Arc<Session>> {
             tracing::debug!(%error, "OpenConnect CSTP session ended");
         }
     });
-    Ok(Arc::new(Session { stack, cancel }))
+    Ok(Arc::new(Session {
+        generation,
+        stack,
+        network,
+        cancel,
+        dns: dns::Resolver::new(servers),
+    }))
 }
 
-async fn destination(metadata: &Metadata) -> Result<SocketAddr> {
-    if let Some(std::net::IpAddr::V4(ip)) = metadata.dst_ip {
-        return Ok(SocketAddr::new(ip.into(), metadata.dst_port));
+async fn destination(metadata: &Metadata, stack: &Stack) -> Result<SocketAddr> {
+    if let Some(ip) = metadata.dst_ip.filter(|ip| stack.supports(*ip)) {
+        return Ok(SocketAddr::new(ip, metadata.dst_port));
     }
     if metadata.host.is_empty() {
         return Err(MeowError::Proxy(
-            "OpenConnect requires an IPv4 destination or hostname".into(),
+            "OpenConnect destination requires a negotiated address family or hostname".into(),
         ));
     }
     meow_common::resolve_host_all(&metadata.host, metadata.dst_port)
         .await?
         .into_iter()
-        .find(SocketAddr::is_ipv4)
-        .ok_or_else(|| MeowError::Dns("OpenConnect target has no IPv4 address".into()))
+        .find(|address| stack.supports(address.ip()))
+        .ok_or_else(|| MeowError::Dns("OpenConnect target has no negotiated address family".into()))
 }
 
 #[async_trait]
@@ -236,22 +381,63 @@ impl ProxyAdapter for OpenConnectAdapter {
         &self.health
     }
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
-        let target = destination(metadata).await?;
         let session = self.session().await?;
+        let target = if self.parameters.options.remote_dns_resolve && !metadata.host.is_empty() {
+            session
+                .dns
+                .resolve(&session.stack, &metadata.host, metadata.dst_port)
+                .await?
+        } else {
+            destination(metadata, &session.stack).await?
+        };
         let stream = session.stack.connect(target).await?;
         Ok(Box::new(Connection {
             stream,
             _session: session,
         }))
     }
-    async fn dial_udp(&self, _: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
+    async fn resolve_udp_destination(
+        &self,
+        metadata: &Metadata,
+    ) -> Result<Option<meow_common::adapter::ResolvedUdpDestination>> {
+        if !self.parameters.options.remote_dns_resolve || metadata.host.is_empty() {
+            return Ok(None);
+        }
+        let session = self.session().await?;
+        let address = session
+            .dns
+            .resolve(&session.stack, &metadata.host, metadata.dst_port)
+            .await?;
+        Ok(Some(meow_common::adapter::ResolvedUdpDestination {
+            address,
+            outbound: None,
+        }))
+    }
+    async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
         if !self.support_udp() {
             return Err(MeowError::UdpNotSupported);
         }
         let session = self.session().await?;
+        // Resolution used for the NAT key may have raced a reconnect. Bind the
+        // actual destination to this socket's generation before sending traffic.
+        let target = if self.parameters.options.remote_dns_resolve && !metadata.host.is_empty() {
+            let resolved = session
+                .dns
+                .resolve(&session.stack, &metadata.host, metadata.dst_port)
+                .await?;
+            Some((
+                metadata
+                    .dst_ip
+                    .map_or(resolved, |ip| SocketAddr::new(ip, metadata.dst_port)),
+                resolved,
+            ))
+        } else {
+            None
+        };
         let socket = session.stack.bind_udp().await?;
         Ok(Box::new(PacketConnection {
             socket,
+            target,
             _session: session,
         }))
     }
@@ -289,6 +475,7 @@ impl AsyncWrite for Connection {
 
 struct PacketConnection {
     socket: meow_netstack::UdpSocket,
+    target: Option<(SocketAddr, SocketAddr)>,
     _session: Arc<Session>,
 }
 #[async_trait]
@@ -297,7 +484,11 @@ impl ProxyPacketConn for PacketConnection {
         Ok(self.socket.recv_from(buf).await?)
     }
     async fn write_packet(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize> {
-        Ok(self.socket.send_to(buf, *addr).await?)
+        let addr = self
+            .target
+            .filter(|(original, _)| original == addr)
+            .map_or(*addr, |(_, resolved)| resolved);
+        Ok(self.socket.send_to(buf, addr).await?)
     }
     fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.socket.local_addr())

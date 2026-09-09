@@ -1,8 +1,8 @@
 //! Cookie-authenticated AnyConnect CSTP over an already verified TLS stream.
-//! This crate transports raw IPv4 packets; it does not resolve names or route sockets.
+//! This crate transports raw IP packets; it does not resolve names or route sockets.
 
 use std::io;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -12,11 +12,14 @@ use tokio_util::sync::CancellationToken;
 
 const HEADER_LIMIT: usize = 32768;
 
+pub mod auth;
+
 /// Request parameters. Cookie is intentionally excluded from Debug output.
 pub struct Options {
     pub authority: String,
     pub cookie: String,
     pub mtu: u16,
+    pub ipv6: bool,
 }
 
 impl Options {
@@ -34,14 +37,31 @@ impl Options {
         if !(576..=1500).contains(&self.mtu) {
             return Err(invalid("CSTP MTU must be between 576 and 1500"));
         }
+        if self.ipv6 && self.mtu < 1280 {
+            return Err(invalid("IPv6 requires an MTU of at least 1280"));
+        }
         Ok(())
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkConfig {
-    pub address: Ipv4Addr,
+    pub address: Option<Ipv4Addr>,
+    pub address6: Option<Ipv6Addr>,
+    pub dns: Vec<IpAddr>,
     pub mtu: u16,
+}
+
+impl NetworkConfig {
+    fn validate_packet(&self, packet: &[u8]) -> io::Result<()> {
+        validate_ip(packet, self.mtu)?;
+        if packet[0] >> 4 == 4 && self.address.is_none()
+            || packet[0] >> 4 == 6 && self.address6.is_none()
+        {
+            return Err(invalid("CSTP packet address family was not negotiated"));
+        }
+        Ok(())
+    }
 }
 
 /// A negotiated tunnel. The buffered reader retains any DATA following the HTTP headers.
@@ -63,8 +83,8 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
         format!("webvpn={}", options.cookie)
     };
     let request = format!(
-        "CONNECT /CSCOSSLC/tunnel HTTP/1.1\r\nHost: {}\r\nUser-Agent: meow-rs\r\nCookie: {cookie}\r\nX-CSTP-Version: 1\r\nX-CSTP-MTU: {}\r\nX-CSTP-Address-Type: IPv4\r\nX-CSTP-Accept-Encoding: identity\r\n\r\n",
-        options.authority, options.mtu,
+        "CONNECT /CSCOSSLC/tunnel HTTP/1.1\r\nHost: {}\r\nUser-Agent: meow-rs\r\nCookie: {cookie}\r\nX-CSTP-Version: 1\r\nX-CSTP-MTU: {}\r\nX-CSTP-Address-Type: {}\r\nX-CSTP-Accept-Encoding: identity\r\n\r\n",
+        options.authority, options.mtu, if options.ipv6 { "IPv4,IPv6" } else { "IPv4" },
     );
     stream.write_all(request.as_bytes()).await?;
     stream.flush().await?;
@@ -83,9 +103,17 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
                 "CSTP cookie rejected",
             ))
         }
+        Some("500" | "502" | "503" | "504") => {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "CSTP gateway temporarily unavailable",
+            ));
+        }
         _ => return Err(invalid("CSTP CONNECT did not return HTTP 200")),
     }
     let mut address = None;
+    let mut address6 = None;
+    let mut dns = Vec::new();
     let mut mtu = None;
     let mut version = None;
     let mut dpd = Duration::from_secs(30);
@@ -105,6 +133,10 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
                     return Err(invalid("unsupported or duplicate CSTP version"));
                 }
             }
+            "x-cstp-address-ip6" => set_ipv6(value, &mut address6, options.ipv6)?,
+            "x-cstp-address" if value.contains(':') => {
+                set_ipv6(value, &mut address6, options.ipv6)?;
+            }
             "x-cstp-address" => {
                 let ip: Ipv4Addr = value
                     .parse()
@@ -115,6 +147,23 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
                     || ip.is_broadcast()
                 {
                     return Err(invalid("invalid or duplicate CSTP IPv4 address"));
+                }
+            }
+            "x-cstp-dns" | "x-cstp-dns-ip6" => {
+                let ip: IpAddr = value
+                    .parse()
+                    .map_err(|_| invalid("invalid CSTP DNS address"))?;
+                if ip.is_unspecified()
+                    || ip.is_multicast()
+                    || matches!(ip, IpAddr::V4(ip) if ip.is_broadcast())
+                {
+                    return Err(invalid("invalid CSTP DNS address"));
+                }
+                if !dns.contains(&ip) {
+                    if dns.len() >= 16 {
+                        return Err(invalid("too many CSTP DNS servers"));
+                    }
+                    dns.push(ip);
                 }
             }
             "x-cstp-mtu" => {
@@ -134,15 +183,46 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
     if version.is_none() {
         return Err(invalid("CSTP version missing"));
     }
+    let mtu = mtu.ok_or_else(|| invalid("CSTP MTU missing"))?;
+    if address.is_none() && address6.is_none() {
+        return Err(invalid("CSTP IP address missing"));
+    }
+    if address6.is_some() && mtu < 1280 {
+        return Err(invalid("CSTP IPv6 MTU below 1280"));
+    }
     Ok(Connection {
         stream,
         network: NetworkConfig {
-            address: address.ok_or_else(|| invalid("CSTP IPv4 address missing"))?,
-            mtu: mtu.ok_or_else(|| invalid("CSTP MTU missing"))?,
+            address,
+            address6,
+            dns,
+            mtu,
         },
         dpd,
         keepalive,
     })
+}
+
+fn set_ipv6(value: &str, address: &mut Option<Ipv6Addr>, enabled: bool) -> io::Result<()> {
+    let (ip, prefix) = value.split_once('/').unwrap_or((value, "128"));
+    let ip: Ipv6Addr = ip
+        .parse()
+        .map_err(|_| invalid("invalid CSTP IPv6 address"))?;
+    let prefix: u8 = prefix
+        .parse()
+        .map_err(|_| invalid("invalid CSTP IPv6 prefix"))?;
+    if !enabled
+        || prefix > 128
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ip.to_ipv4_mapped().is_some()
+        || address.replace(ip).is_some()
+    {
+        return Err(invalid(
+            "invalid, unrequested or duplicate CSTP IPv6 address",
+        ));
+    }
+    Ok(())
 }
 
 async fn header_line<S: AsyncRead + Unpin>(
@@ -190,7 +270,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 let (kind, payload) = read_frame(&mut reader, self.network.mtu).await?;
                 last_received.store(epoch.elapsed().as_secs(), Ordering::Relaxed);
                 match kind {
-                    0 => incoming.send(payload).await.map_err(|_| closed())?,
+                    0 => {
+                        self.network.validate_packet(&payload)?;
+                        incoming.send(payload).await.map_err(|_| closed())?;
+                    }
                     3 => control_tx.send(4).await.map_err(|_| closed())?,
                     4 | 7 => {}
                     5 => {
@@ -223,7 +306,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                     },
                 };
                 if kind == 0 {
-                    validate_ipv4(&payload, self.network.mtu)?;
+                    self.network.validate_packet(&payload)?;
                 }
                 write_frame(&mut writer, kind, &payload).await?;
             }
@@ -251,7 +334,7 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
     let mut payload = vec![0; length];
     reader.read_exact(&mut payload).await?;
     if header[6] == 0 {
-        validate_ipv4(&payload, mtu)?;
+        validate_ip(&payload, mtu)?;
     }
     Ok((header[6], payload))
 }
@@ -264,11 +347,28 @@ pub async fn write_frame<W: AsyncWrite + Unpin>(
     let length = u16::try_from(payload.len())
         .map_err(|_| invalid("CSTP packet too large"))?
         .to_be_bytes();
-    writer
-        .write_all(&[b'S', b'T', b'F', 1, length[0], length[1], kind, 0])
-        .await?;
-    writer.write_all(payload).await?;
+    // ocserv consumes each TLS application record as one complete CSTP frame.
+    // Separate header/payload writes become separate records in SSL_write and
+    // are rejected, even though a stream-only fixture can reassemble them.
+    let mut frame = Vec::with_capacity(8 + payload.len());
+    frame.extend_from_slice(&[b'S', b'T', b'F', 1, length[0], length[1], kind, 0]);
+    frame.extend_from_slice(payload);
+    writer.write_all(&frame).await?;
     writer.flush().await
+}
+
+pub fn validate_ip(packet: &[u8], mtu: u16) -> io::Result<()> {
+    match packet.first().map(|byte| byte >> 4) {
+        Some(4) => validate_ipv4(packet, mtu),
+        Some(6)
+            if packet.len() >= 40
+                && packet.len() <= usize::from(mtu)
+                && usize::from(u16::from_be_bytes([packet[4], packet[5]])) + 40 == packet.len() =>
+        {
+            Ok(())
+        }
+        _ => Err(invalid("invalid IP packet in CSTP tunnel")),
+    }
 }
 
 pub fn validate_ipv4(packet: &[u8], mtu: u16) -> io::Result<()> {

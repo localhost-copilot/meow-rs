@@ -10,6 +10,7 @@ fn options() -> Options {
         authority: "vpn.example:443".into(),
         cookie: "fixture-cookie".into(),
         mtu: 1400,
+        ipv6: false,
     }
 }
 fn packet() -> Vec<u8> {
@@ -112,4 +113,93 @@ async fn silent_peer_times_out() {
     let worker = tokio::spawn(connection.run(rx, tx, token));
     let error = worker.await.unwrap().unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+}
+
+#[tokio::test]
+async fn ipv6_network_parameters_and_packet_boundaries() {
+    let (client, mut server) = tokio::io::duplex(8192);
+    let peer = tokio::spawn(async move {
+        consume_request(&mut server).await;
+        server.write_all(b"HTTP/1.1 200 OK\r\nX-CSTP-Version: 1\r\nX-CSTP-Address-IP6: 2001:db8::2/127\r\nX-CSTP-MTU: 1280\r\nX-CSTP-DNS: 192.0.2.53\r\nX-CSTP-DNS: 2001:db8::53\r\nX-CSTP-DNS: 192.0.2.53\r\n\r\n").await.unwrap();
+        server
+    });
+    let mut options = options();
+    options.ipv6 = true;
+    let connection = connect(client, &options).await.unwrap();
+    assert_eq!(connection.network.address, None);
+    assert_eq!(
+        connection.network.address6,
+        Some("2001:db8::2".parse().unwrap())
+    );
+    assert_eq!(
+        connection.network.dns,
+        vec![
+            "192.0.2.53".parse::<std::net::IpAddr>().unwrap(),
+            "2001:db8::53".parse().unwrap()
+        ]
+    );
+    let mut server = peer.await.unwrap();
+    let (outgoing, rx) = mpsc::channel(2);
+    let (tx, mut incoming) = mpsc::channel(2);
+    let worker = tokio::spawn(connection.run(rx, tx, CancellationToken::new()));
+    let mut packet6 = vec![0; 1280];
+    packet6[0] = 0x60;
+    packet6[4..6].copy_from_slice(&1240u16.to_be_bytes());
+    meow_openconnect::write_frame(&mut server, 0, &packet6)
+        .await
+        .unwrap();
+    assert_eq!(incoming.recv().await.unwrap(), packet6);
+    outgoing.send(packet6.clone()).await.unwrap();
+    assert_eq!(
+        read_frame(&mut server, 1280).await.unwrap(),
+        (0, packet6.clone())
+    );
+    // A valid IPv4 packet must not enter a generation configured only for IPv6.
+    outgoing.send(packet()).await.unwrap();
+    assert!(worker.await.unwrap().is_err());
+    packet6[5] -= 1;
+    assert!(meow_openconnect::validate_ip(&packet6, 1280).is_err());
+    assert!(meow_openconnect::validate_ip(&[0x60; 39], 1280).is_err());
+}
+
+#[tokio::test]
+async fn invalid_ipv6_network_configuration_is_rejected() {
+    for (extra, ipv6) in [
+        (
+            "X-CSTP-Address-IP6: 2001:db8::2/129\r\nX-CSTP-MTU: 1280",
+            true,
+        ),
+        (
+            "X-CSTP-Address-IP6: 2001:db8::2/64\r\nX-CSTP-MTU: 1279",
+            true,
+        ),
+        (
+            "X-CSTP-Address-IP6: 2001:db8::2/64\r\nX-CSTP-MTU: 1280",
+            false,
+        ),
+        ("X-CSTP-Address-IP6: ff02::1\r\nX-CSTP-MTU: 1280", true),
+        (
+            "X-CSTP-Address-IP6: 2001:db8::2\r\nX-CSTP-Address: 2001:db8::3\r\nX-CSTP-MTU: 1280",
+            true,
+        ),
+        (
+            "X-CSTP-Address: 192.0.2.2\r\nX-CSTP-DNS: invalid\r\nX-CSTP-MTU: 1280",
+            true,
+        ),
+    ] {
+        let (client, mut server) = tokio::io::duplex(8192);
+        let peer = tokio::spawn(async move {
+            consume_request(&mut server).await;
+            server
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nX-CSTP-Version: 1\r\n{extra}\r\n\r\n").as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let mut options = options();
+        options.ipv6 = ipv6;
+        assert!(connect(client, &options).await.is_err(), "accepted {extra}");
+        peer.await.unwrap();
+    }
 }

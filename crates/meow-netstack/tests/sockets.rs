@@ -7,6 +7,92 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[tokio::test]
+async fn ipv6_only_and_dual_stack_transfer_and_explicit_close() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for ipv4 in [None, Some(Ipv4Addr::new(192, 0, 2, 2))] {
+            let (to_peer, peer_in) = mpsc::channel(4);
+            let (peer_out, from_peer) = mpsc::channel(4);
+            let peer = tokio::spawn(peer::run(peer_in, peer_out, CancellationToken::new()));
+            let stack = Stack::with_addresses(
+                ipv4,
+                Some("2001:db8::2".parse().unwrap()),
+                1280,
+                from_peer,
+                to_peer,
+            )
+            .unwrap();
+            let mut tcp = stack
+                .connect(SocketAddr::new(peer::ADDRESS6.into(), peer::TCP_PORT))
+                .await
+                .unwrap();
+            let expected = vec![23; 65536];
+            let (mut read, mut write) = tokio::io::split(&mut tcp);
+            let send = async {
+                write.write_all(&expected).await.unwrap();
+                write.shutdown().await.unwrap();
+            };
+            let receive = async {
+                let mut actual = Vec::new();
+                read.read_to_end(&mut actual).await.unwrap();
+                assert_eq!(actual, expected);
+            };
+            tokio::join!(send, receive);
+            let udp = stack.bind_udp().await.unwrap();
+            // One UDP socket can alternate address families, including maximum-size IPv6 datagrams.
+            let mut targets = vec![peer::ADDRESS6.into()];
+            if ipv4.is_some() {
+                targets.push(peer::ADDRESS.into());
+            }
+            for ip in targets {
+                let target = SocketAddr::new(ip, peer::UDP_PORT);
+                for size in [0, 1232] {
+                    let bytes = vec![31; size];
+                    udp.send_to(&bytes, target).await.unwrap();
+                    let mut received = [0; 1280];
+                    let (n, source) = udp.recv_from(&mut received).await.unwrap();
+                    assert_eq!(source, target);
+                    assert_eq!(&received[..n], bytes);
+                }
+            }
+            assert!(udp
+                .send_to(
+                    &[0; 1233],
+                    SocketAddr::new(peer::ADDRESS6.into(), peer::UDP_PORT)
+                )
+                .await
+                .is_err());
+            if ipv4.is_none() {
+                assert!(stack
+                    .connect(SocketAddr::new(peer::ADDRESS.into(), peer::TCP_PORT))
+                    .await
+                    .is_err());
+            }
+            let mut active = stack
+                .connect(SocketAddr::new(peer::ADDRESS6.into(), peer::TCP_PORT))
+                .await
+                .unwrap();
+            let read = async {
+                assert!(active.read(&mut [0; 1]).await.is_err());
+            };
+            let receive = async {
+                assert!(udp.recv_from(&mut [0; 1]).await.is_err());
+            };
+            let close = async {
+                tokio::task::yield_now().await;
+                stack.close();
+            };
+            tokio::join!(read, receive, close);
+            stack.closed().await;
+            assert!(stack.is_closed());
+            // Teardown closes the packet channel even with application handles still alive.
+            peer.await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
 fn stack() -> (Stack, CancellationToken, tokio::task::JoinHandle<()>) {
     let (to_peer, peer_in) = mpsc::channel(4);
     let (peer_out, from_peer) = mpsc::channel(4);

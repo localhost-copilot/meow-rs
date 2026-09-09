@@ -1,4 +1,4 @@
-//! Tokio TCP/UDP sockets backed by an independent smoltcp IPv4 stack.
+//! Tokio TCP/UDP sockets backed by an independent smoltcp IP stack.
 //! Each stack owns its socket set in one task and exchanges raw IP packets with
 //! its caller. No system interface, route, or global network stack is installed.
 
@@ -7,7 +7,7 @@ mod driver;
 
 use parking_lot::Mutex;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -15,7 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite, DuplexStream, ReadBuf};
 use tokio::sync::{mpsc, oneshot, Notify};
 use tokio_util::sync::CancellationToken;
 
-type Packet = (Vec<u8>, SocketAddrV4);
+type Packet = (Vec<u8>, SocketAddr);
 type Failure = Arc<Mutex<Option<String>>>;
 const SOCKET_BUFFER: usize = 32768;
 const MAX_SOCKETS: usize = 1024;
@@ -35,7 +35,8 @@ struct Lifetime {
     cancel: CancellationToken,
     wake: Arc<Notify>,
     failure: Failure,
-    address: Ipv4Addr,
+    address: Option<Ipv4Addr>,
+    address6: Option<Ipv6Addr>,
     mtu: u16,
 }
 impl Drop for Lifetime {
@@ -55,55 +56,97 @@ impl Stack {
         incoming: mpsc::Receiver<Vec<u8>>,
         outgoing: mpsc::Sender<Vec<u8>>,
     ) -> io::Result<Self> {
-        if address.is_unspecified()
-            || address.is_multicast()
-            || address.is_broadcast()
+        Self::with_addresses(Some(address), None, mtu, incoming, outgoing)
+    }
+
+    /// Create an independent stack for the negotiated address families.
+    /// IPv6 requires an MTU of at least 1280. Must be called in a Tokio runtime.
+    pub fn with_addresses(
+        address: Option<Ipv4Addr>,
+        address6: Option<Ipv6Addr>,
+        mtu: u16,
+        incoming: mpsc::Receiver<Vec<u8>>,
+        outgoing: mpsc::Sender<Vec<u8>>,
+    ) -> io::Result<Self> {
+        if address.is_none() && address6.is_none()
+            || address
+                .is_some_and(|ip| ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast())
+            || address6.is_some_and(|ip| {
+                ip.is_unspecified() || ip.is_multicast() || ip.to_ipv4_mapped().is_some()
+            })
             || !(576..=1500).contains(&mtu)
+            || address6.is_some() && mtu < 1280
         {
-            return Err(invalid("invalid userspace IPv4 address or MTU"));
+            return Err(invalid("invalid userspace IP addresses or MTU"));
         }
         let (tx, rx) = mpsc::channel(64);
         let cancel = CancellationToken::new();
         let wake = Arc::new(Notify::new());
         let failure = Arc::new(Mutex::new(None));
-        let actor = driver::Driver::new(address, mtu, rx, Arc::clone(&wake));
+        let actor = driver::Driver::new(address, address6, mtu, rx, Arc::clone(&wake));
         let stack = Self(Arc::new(Lifetime {
             commands: tx,
             cancel: cancel.clone(),
             wake,
             failure: Arc::clone(&failure),
             address,
+            address6,
             mtu,
         }));
         tokio::spawn(async move {
             // Publish failure before dropping bridge endpoints, so awakened readers
             // observe an error rather than mistaking tunnel failure for orderly EOF.
             let mut actor = actor;
-            let result = actor.run(incoming, outgoing, cancel).await;
+            let result = actor.run(incoming, outgoing, cancel.clone()).await;
             *failure.lock() = Some(
                 result
                     .err()
                     .map_or_else(|| "userspace IP stack closed".to_owned(), |e| e.to_string()),
             );
+            cancel.cancel();
         });
         Ok(stack)
     }
 
     pub fn is_closed(&self) -> bool {
-        self.0.failure.lock().is_some()
+        self.0.cancel.is_cancelled()
+    }
+
+    /// Stop this generation, waking pending connections and packet readers.
+    pub fn close(&self) {
+        *self.0.failure.lock() = Some("userspace IP stack closed".into());
+        self.0.cancel.cancel();
+    }
+
+    pub async fn closed(&self) {
+        self.0.cancel.cancelled().await;
+    }
+
+    pub fn supports(&self, address: IpAddr) -> bool {
+        match address {
+            IpAddr::V4(_) => self.0.address.is_some(),
+            IpAddr::V6(_) => self.0.address6.is_some(),
+        }
+    }
+
+    fn validate_destination(&self, destination: SocketAddr) -> io::Result<()> {
+        let ip = destination.ip();
+        if destination.port() == 0
+            || ip.is_unspecified()
+            || ip.is_multicast()
+            || matches!(ip, IpAddr::V4(ip) if ip.is_broadcast())
+            || matches!(destination, SocketAddr::V6(addr) if addr.scope_id() != 0 || addr.ip().to_ipv4_mapped().is_some())
+        {
+            return Err(invalid("invalid userspace IP destination"));
+        }
+        if !self.supports(ip) {
+            return Err(invalid("destination address family was not negotiated"));
+        }
+        Ok(())
     }
 
     pub async fn connect(&self, destination: SocketAddr) -> io::Result<TcpStream> {
-        let SocketAddr::V4(destination) = destination else {
-            return Err(invalid("userspace outbound currently supports IPv4 only"));
-        };
-        if destination.port() == 0
-            || destination.ip().is_unspecified()
-            || destination.ip().is_multicast()
-            || destination.ip().is_broadcast()
-        {
-            return Err(invalid("invalid TCP destination"));
-        }
+        self.validate_destination(destination)?;
         let (application, bridge) = tokio::io::duplex(SOCKET_BUFFER);
         let flow = Flow::new();
         let stream = TcpStream {
@@ -232,7 +275,8 @@ impl AsyncWrite for TcpStream {
     }
 }
 
-/// An ephemeral IPv4 UDP socket. Send completion means queued, not acknowledged.
+/// An ephemeral UDP socket accepting all negotiated address families.
+/// Send completion means queued, not acknowledged.
 /// Receive buffers are bounded; UDP packets are dropped when the application is slow.
 pub struct UdpSocket {
     stack: Stack,
@@ -243,7 +287,11 @@ pub struct UdpSocket {
 }
 impl UdpSocket {
     pub fn local_addr(&self) -> SocketAddr {
-        SocketAddrV4::new(self.stack.0.address, self.port).into()
+        let address = self.stack.0.address.map_or_else(
+            || self.stack.0.address6.expect("negotiated family").into(),
+            IpAddr::V4,
+        );
+        SocketAddr::new(address, self.port)
     }
     pub fn close(&self) {
         self.flow.cancel.cancel();
@@ -251,17 +299,9 @@ impl UdpSocket {
     }
     pub async fn send_to(&self, data: &[u8], destination: SocketAddr) -> io::Result<usize> {
         self.flow.error(&self.stack)?;
-        let SocketAddr::V4(destination) = destination else {
-            return Err(invalid("userspace UDP currently supports IPv4 only"));
-        };
-        if destination.port() == 0
-            || destination.ip().is_unspecified()
-            || destination.ip().is_multicast()
-            || destination.ip().is_broadcast()
-        {
-            return Err(invalid("invalid UDP destination"));
-        }
-        if data.len() > usize::from(self.stack.0.mtu) - 28 {
+        self.stack.validate_destination(destination)?;
+        let overhead = if destination.is_ipv4() { 28 } else { 48 };
+        if data.len() > usize::from(self.stack.0.mtu) - overhead {
             return Err(invalid("UDP payload exceeds tunnel MTU"));
         }
         tokio::select! {
@@ -282,7 +322,7 @@ impl UdpSocket {
         };
         let n = buf.len().min(packet.0.len());
         buf[..n].copy_from_slice(&packet.0[..n]);
-        Ok((n, packet.1.into()))
+        Ok((n, packet.1))
     }
 }
 impl Drop for UdpSocket {

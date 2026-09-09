@@ -6,11 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "AnyConnect CSTP packet transport for meow-rs."
+description = "AnyConnect authentication and CSTP packet transport for meow-rs."
 
 [dependencies]
 tokio = { workspace = true }
 tokio-util = { workspace = true }
+roxmltree = "0.21.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -760,12 +760,15 @@ impl DnsClient {
     }
 }
 
-struct ExpectedResponse {
-    id: u16,
-    query: Query,
+/// Transaction identity checked by custom DNS transports before accepting replies.
+pub struct ExpectedResponse {
+    pub id: u16,
+    pub query: Query,
 }
 
-fn decode_validated_response(
+/// Decode a response and validate its ID, opcode, response bit, and sole question.
+/// Transport implementations must separately validate the peer and handle truncation.
+pub fn decode_validated_response(
     wire: &[u8],
     expected: &ExpectedResponse,
 ) -> Result<Message, ClientError> {
@@ -897,7 +900,9 @@ struct CnameLink {
     ambiguous: bool,
 }
 
-fn relevant_ip_answers(message: &Message) -> (Vec<IpAddr>, Option<u32>) {
+/// Return addresses reachable from the question through an unambiguous CNAME chain,
+/// together with their minimum TTL. Call only after validating the response and RCODE.
+pub fn relevant_ip_answers(message: &Message) -> (Vec<IpAddr>, Option<u32>) {
     let Some(question) = message.queries.first() else {
         return (Vec::new(), None);
     };

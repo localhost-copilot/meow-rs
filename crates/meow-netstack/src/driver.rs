@@ -6,7 +6,7 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::io;
-use std::net::{Ipv4Addr, SocketAddrV4};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) enum Command {
     Tcp {
-        destination: SocketAddrV4,
+        destination: SocketAddr,
         bridge: DuplexStream,
         flow: Arc<Flow>,
         ready: oneshot::Sender<io::Result<()>>,
@@ -69,7 +69,8 @@ pub(crate) struct Driver {
 
 impl Driver {
     pub fn new(
-        address: Ipv4Addr,
+        address: Option<Ipv4Addr>,
+        address6: Option<Ipv6Addr>,
         mtu: u16,
         commands: mpsc::Receiver<Command>,
         wake: Arc<Notify>,
@@ -83,16 +84,31 @@ impl Driver {
         config.random_seed = rand::random();
         let mut iface = Interface::new(config, &mut device, SmolInstant::ZERO);
         iface.update_ip_addrs(|addresses| {
-            addresses
-                .push(IpCidr::new(IpAddress::Ipv4(address), 32))
-                .expect("one address fits");
+            if let Some(address) = address {
+                addresses
+                    .push(IpCidr::new(address.into(), 32))
+                    .expect("IPv4 address fits");
+            }
+            if let Some(address) = address6 {
+                addresses
+                    .push(IpCidr::new(address.into(), 128))
+                    .expect("IPv6 address fits");
+            }
         });
         // An IP-only link has no ARP gateway. The route selects this tunnel;
         // the destination in emitted IP packets remains the remote endpoint.
-        iface
-            .routes_mut()
-            .add_default_ipv4_route(address)
-            .expect("one route fits");
+        if let Some(address) = address {
+            iface
+                .routes_mut()
+                .add_default_ipv4_route(address)
+                .expect("IPv4 route fits");
+        }
+        if let Some(address) = address6 {
+            iface
+                .routes_mut()
+                .add_default_ipv6_route(address)
+                .expect("IPv6 route fits");
+        }
         Self {
             iface,
             device,
@@ -143,7 +159,7 @@ impl Driver {
                 if socket
                     .connect(
                         self.iface.context(),
-                        (IpAddress::Ipv4(*destination.ip()), destination.port()),
+                        (IpAddress::from(destination.ip()), destination.port()),
                         port,
                     )
                     .is_err()
@@ -428,7 +444,7 @@ fn pump_udp(
     }
     if let Some((bytes, target)) = entry.pending.as_ref() {
         if socket
-            .send_slice(bytes, (IpAddress::Ipv4(*target.ip()), target.port()))
+            .send_slice(bytes, (IpAddress::from(target.ip()), target.port()))
             .is_ok()
         {
             entry.pending = None;
@@ -439,10 +455,9 @@ fn pump_udp(
     // inbox is full rather than stalling every TCP connection on this tunnel.
     while socket.can_recv() {
         if let Ok((packet, meta)) = socket.recv() {
-            let IpAddress::Ipv4(address) = meta.endpoint.addr;
             let _ = entry.incoming.try_send((
                 packet.to_vec(),
-                SocketAddrV4::new(address, meta.endpoint.port),
+                SocketAddr::new(meta.endpoint.addr.into(), meta.endpoint.port),
             ));
             *progress = true;
         }

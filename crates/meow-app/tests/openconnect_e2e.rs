@@ -13,16 +13,105 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+#[tokio::test]
+#[ignore = "requires Docker image meow-openconnect-ocserv:test; see docs/openconnect.md"]
+async fn independent_ocserv_password_dns_ipv4_ipv6_tcp_udp() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("meow_proxy=debug")
+        .try_init();
+    struct Container(String);
+    impl Drop for Container {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", &self.0])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(45), async {
+        let fixture = tempfile::tempdir().unwrap();
+        let mount = format!("{}:/fixture", fixture.path().display());
+        let output = tokio::process::Command::new("docker").args([
+            "run", "--rm", "-d", "--cap-add", "NET_ADMIN", "--device", "/dev/net/tun",
+            "--sysctl", "net.ipv6.conf.all.disable_ipv6=0", "-p", "127.0.0.1::443", "-v", &mount,
+            "meow-openconnect-ocserv:test",
+        ]).output().await.unwrap();
+        assert!(output.status.success(), "docker run failed: {}", String::from_utf8_lossy(&output.stderr));
+        let container = Container(String::from_utf8(output.stdout).unwrap().trim().to_owned());
+        let output = tokio::process::Command::new("docker").args(["port", &container.0, "443/tcp"]).output().await.unwrap();
+        assert!(output.status.success());
+        let address: SocketAddr = String::from_utf8(output.stdout).unwrap().trim().parse().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                // Docker's published port can accept before ocserv (or even its
+                // certificate) exists. Wait for the server's actual readiness.
+                let logs = tokio::process::Command::new("docker").args(["logs", &container.0]).output().await.unwrap();
+                if String::from_utf8_lossy(&logs.stderr).contains("listening (TCP)") { break; }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }).await.expect("ocserv did not become ready");
+        let yaml = format!("dns:\n  enable: false\nproxies:\n  - name: vpn\n    type: openconnect\n    server: 127.0.0.1\n    port: {}\n    server-name: vpn.test\n    ca: '{}'\n    username: fixture-user\n    password: fixture-password\n    authgroup: engineering\n    ipv6-disabled: false\n    remote-dns-resolve: true\n", address.port(), fixture.path().join("ca.pem").display());
+        let config = meow_config::load_config_from_str(&yaml).await.unwrap();
+        let proxy = config.proxies.get("vpn").expect("ocserv fixture configuration must produce a VPN outbound");
+        for host in ["service.vpn.test", "ipv6.vpn.test"] {
+            let mut target = Metadata { host: host.into(), dst_port: 8080, ..Default::default() };
+            let result = proxy.dial_tcp(&target).await;
+            if result.is_err() {
+                let logs = tokio::process::Command::new("docker").args(["logs", &container.0]).output().await.unwrap();
+                eprintln!("ocserv fixture: {}", String::from_utf8_lossy(&logs.stderr));
+            }
+            let mut tcp = result.unwrap();
+            tcp.write_all(b"independent ocserv").await.unwrap();
+            let mut received = [0; 18]; tcp.read_exact(&mut received).await.unwrap(); assert_eq!(&received, b"independent ocserv");
+            target.dst_port = 5353;
+            let destination = proxy.resolve_udp_destination(&target).await.unwrap().unwrap().address;
+            assert_eq!(destination.is_ipv6(), host == "ipv6.vpn.test");
+            target.dst_ip = Some(destination.ip());
+            let udp = proxy.dial_udp(&target).await.unwrap();
+            udp.write_packet(b"ocserv UDP", &destination).await.unwrap();
+            let mut received = [0; 32]; let (n, source) = udp.read_packet(&mut received).await.unwrap();
+            assert_eq!(source, destination); assert_eq!(&received[..n], b"ocserv UDP");
+        }
+    }).await.unwrap();
+}
+
 async fn socks(address: SocketAddr, command: u8, port: u16) -> (TcpStream, SocketAddr) {
+    socks_target(
+        address,
+        command,
+        SocketAddr::new(peer::ADDRESS.into(), port),
+    )
+    .await
+}
+
+async fn socks_target(
+    address: SocketAddr,
+    command: u8,
+    target: SocketAddr,
+) -> (TcpStream, SocketAddr) {
+    let mut request = vec![5, command, 0];
+    match target.ip() {
+        std::net::IpAddr::V4(ip) => {
+            request.push(1);
+            request.extend_from_slice(&ip.octets());
+        }
+        std::net::IpAddr::V6(ip) => {
+            request.push(4);
+            request.extend_from_slice(&ip.octets());
+        }
+    }
+    request.extend_from_slice(&target.port().to_be_bytes());
+    socks_request(address, &request).await
+}
+
+async fn socks_request(address: SocketAddr, request: &[u8]) -> (TcpStream, SocketAddr) {
     let mut stream = TcpStream::connect(address).await.unwrap();
     stream.write_all(&[5, 1, 0]).await.unwrap();
     let mut method = [0; 2];
     stream.read_exact(&mut method).await.unwrap();
     assert_eq!(method, [5, 0]);
-    let mut request = vec![5, command, 0, 1];
-    request.extend_from_slice(&peer::ADDRESS.octets());
-    request.extend_from_slice(&port.to_be_bytes());
-    stream.write_all(&request).await.unwrap();
+    stream.write_all(request).await.unwrap();
     let mut response = [0; 10];
     stream.read_exact(&mut response).await.unwrap();
     assert_eq!(&response[..4], &[5, 0, 0, 1]);
@@ -31,6 +120,156 @@ async fn socks(address: SocketAddr, command: u8, port: u16) -> (TcpStream, Socke
         u16::from_be_bytes([response[8], response[9]]),
     ));
     (stream, bound)
+}
+
+#[tokio::test]
+async fn vpn_dns_handles_internal_domains_udp_tcp_fallback_and_group_routing() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let gateway = Gateway::start(false).await;
+        gateway.network.send_replace(Some("X-CSTP-Address: 192.0.2.2\r\nX-CSTP-Address-IP6: 2001:db8::2/64\r\nX-CSTP-MTU: 1280\r\nX-CSTP-DNS: 192.0.2.1\r\n".into()));
+        let yaml = gateway.yaml("fixture-cookie")
+            .replace("ipv6: false", "ipv6: true")
+            .replace("    dtls-mode: off", "    dtls-mode: off\n    ipv6-disabled: false\n    remote-dns-resolve: true")
+            .replace("rules:\n  - MATCH,vpn", "proxy-groups:\n  - name: selected-vpn\n    type: select\n    proxies: [vpn, REJECT]\nrules:\n  - IP-CIDR,192.0.2.0/24,REJECT,no-resolve\n  - MATCH,selected-vpn");
+        let config = meow_config::load_config_from_str(&yaml).await.unwrap();
+        let tunnel = meow_tunnel::Tunnel::new(Arc::clone(&config.dns.resolver));
+        let selection = Arc::clone(config.proxies.get("selected-vpn").unwrap());
+        tunnel.update_routing(config.proxies, config.rules);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mixed = meow_listener::MixedListener::new(tunnel.clone(), address, "vpn-dns".into());
+        let task = tokio::spawn(async move { mixed.run_on(listener).await.unwrap(); });
+        for name in ["service.vpn.test", "truncated.vpn.test", "ipv6.vpn.test"] {
+            let mut request = vec![5, 1, 0, 3, name.len() as u8];
+            request.extend_from_slice(name.as_bytes()); request.extend_from_slice(&peer::TCP_PORT.to_be_bytes());
+            let (mut tcp, _) = socks_request(address, &request).await;
+            tcp.write_all(b"VPN DNS").await.unwrap();
+            let mut reply = [0; 7]; tcp.read_exact(&mut reply).await.unwrap(); assert_eq!(&reply, b"VPN DNS");
+        }
+        let (control, relay) = socks_target(address, 3, "0.0.0.0:0".parse().unwrap()).await;
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let name = "service.vpn.test";
+        let mut packet = vec![0, 0, 0, 3, name.len() as u8];
+        packet.extend_from_slice(name.as_bytes()); packet.extend_from_slice(&peer::UDP_PORT.to_be_bytes()); packet.extend_from_slice(b"internal UDP");
+        udp.send_to(&packet, relay).await.unwrap();
+        let mut response = [0; 1280]; let (n, from) = udp.recv_from(&mut response).await.unwrap();
+        assert_eq!(from, relay); assert_eq!(&response[4..8], peer::ADDRESS.octets()); assert_eq!(&response[10..n], b"internal UDP");
+        assert_eq!(*gateway.attempts.borrow(), 1);
+        let mut target = Metadata { host: "service.vpn.test".into(), dst_port: peer::UDP_PORT, network: meow_common::Network::Udp, ..Default::default() };
+        let route = tunnel.inner().resolve_udp_host(&mut target).await.unwrap().unwrap();
+        selection.selection().unwrap().set("REJECT").await.unwrap();
+        // Both the selection and an IP rule now disagree with the original route.
+        // Its DNS answer must stay attached to the VPN that resolved it.
+        let conn = route.0.dial_udp(&target).await.unwrap();
+        conn.write_packet(b"pinned", &SocketAddr::new(target.dst_ip.unwrap(), target.dst_port)).await.unwrap();
+        let mut reply = [0; 16]; let (n, _) = conn.read_packet(&mut reply).await.unwrap(); assert_eq!(&reply[..n], b"pinned");
+        drop(control); task.abort(); let _ = task.await;
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_vpn_dns_overrides_pushed_dns_and_missing_dns_fails_closed() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let gateway = Gateway::start(false).await;
+        let yaml = gateway.yaml("fixture-cookie").replace(
+            "    dtls-mode: off",
+            "    dtls-mode: off\n    remote-dns-resolve: true",
+        );
+        let config = meow_config::load_config_from_str(&yaml).await.unwrap();
+        let target = Metadata {
+            host: "localhost".into(),
+            ..metadata()
+        };
+        let error = config
+            .proxies
+            .get("vpn")
+            .unwrap()
+            .dial_tcp(&target)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("no usable VPN DNS"));
+        // Pushed server is unreachable; the explicit server must take precedence.
+        gateway.network.send_replace(Some(
+            "X-CSTP-Address: 192.0.2.2\r\nX-CSTP-MTU: 1280\r\nX-CSTP-DNS: 192.0.2.99\r\n".into(),
+        ));
+        let config = meow_config::load_config_from_str(&yaml.replace(
+            "    remote-dns-resolve: true",
+            "    remote-dns-resolve: true\n    dns: [192.0.2.1]",
+        ))
+        .await
+        .unwrap();
+        let proxy = config.proxies.get("vpn").unwrap();
+        // Preserve and use the original hostname even if routing supplied a different IP.
+        let mut target = Metadata {
+            host: "service.vpn.test".into(),
+            dst_ip: Some("192.0.2.99".parse().unwrap()),
+            ..metadata()
+        };
+        let mut tcp = proxy.dial_tcp(&target).await.unwrap();
+        tcp.write_all(b"dns").await.unwrap();
+        tcp.read_exact(&mut [0; 3]).await.unwrap();
+        target.host = "missing.vpn.test".into();
+        assert!(proxy
+            .dial_tcp(&target)
+            .await
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("does not exist"));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn ipv6_socks_tcp_and_udp_share_the_dual_stack_session() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let gateway = Gateway::start(false).await;
+        let yaml = gateway
+            .yaml("fixture-cookie")
+            .replace("ipv6: false", "ipv6: true")
+            .replace(
+                "    dtls-mode: off",
+                "    dtls-mode: off\n    ipv6-disabled: false",
+            );
+        let config = meow_config::load_config_from_str(&yaml).await.unwrap();
+        let tunnel = meow_tunnel::Tunnel::new(Arc::clone(&config.dns.resolver));
+        tunnel.update_routing(config.proxies, config.rules);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mixed = meow_listener::MixedListener::new(tunnel, address, "phase-two".into());
+        let task = tokio::spawn(async move {
+            mixed.run_on(listener).await.unwrap();
+        });
+        let (mut tcp, _) = socks_target(
+            address,
+            1,
+            SocketAddr::new(peer::ADDRESS6.into(), peer::TCP_PORT),
+        )
+        .await;
+        tcp.write_all(b"IPv6 through CSTP").await.unwrap();
+        let mut reply = [0; 17];
+        tcp.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"IPv6 through CSTP");
+        let (control, relay) = socks_target(address, 3, "0.0.0.0:0".parse().unwrap()).await;
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut packet = vec![0, 0, 0, 4];
+        packet.extend_from_slice(&peer::ADDRESS6.octets());
+        packet.extend_from_slice(&peer::UDP_PORT.to_be_bytes());
+        packet.extend_from_slice(b"IPv6 UDP");
+        udp.send_to(&packet, relay).await.unwrap();
+        let mut response = [0; 1280];
+        let (n, from) = udp.recv_from(&mut response).await.unwrap();
+        assert_eq!(from, relay);
+        assert_eq!(&response[..n], packet);
+        assert_eq!(*gateway.attempts.borrow(), 1);
+        drop((tcp, control));
+        task.abort();
+        let _ = task.await;
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -120,6 +359,135 @@ fn metadata() -> Metadata {
         dst_port: peer::TCP_PORT,
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn reconnect_rebuilds_addresses_dns_and_mtu_without_reviving_old_sockets() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut gateway = Gateway::start(false).await;
+        gateway.network.send_replace(Some("X-CSTP-Address: 192.0.2.2\r\nX-CSTP-MTU: 1280\r\nX-CSTP-DNS: 192.0.2.1\r\n".into()));
+        let yaml = gateway.yaml("fixture-cookie")
+            .replace("    cookie: fixture-cookie", "    username: fixture-user\n    password: fixture-password\n    authgroup: Engineering")
+            .replace("    dtls-mode: off", "    dtls-mode: off\n    ipv6-disabled: false\n    remote-dns-resolve: true");
+        let config = meow_config::load_config_from_str(&yaml).await.unwrap();
+        let proxy = Arc::clone(config.proxies.get("vpn").unwrap()); drop(config);
+        let target = Metadata { host: "service.vpn.test".into(), ..metadata() };
+        let mut old_tcp = proxy.dial_tcp(&target).await.unwrap();
+        let old_udp = proxy.dial_udp(&metadata()).await.unwrap();
+        old_tcp.write_all(b"old").await.unwrap(); old_tcp.read_exact(&mut [0; 3]).await.unwrap();
+        let udp_target = SocketAddr::new(peer::ADDRESS.into(), peer::UDP_PORT);
+        old_udp.write_packet(b"old", &udp_target).await.unwrap(); old_udp.read_packet(&mut [0; 8]).await.unwrap();
+        assert!(old_udp.write_packet(&[0; 1253], &udp_target).await.is_err());
+        gateway.gate.acquire_many(gateway.gate.available_permits() as u32).await.unwrap().forget();
+        gateway.network.send_replace(Some("X-CSTP-Address: 192.0.2.3\r\nX-CSTP-Address-IP6: 2001:db8::3/64\r\nX-CSTP-MTU: 1400\r\nX-CSTP-DNS: 2001:db8::1\r\n".into()));
+        let mut packets = gateway.packets.subscribe();
+        gateway.disconnect.send_modify(|n| *n += 1);
+        assert!(old_tcp.read(&mut [0; 1]).await.is_err());
+        assert!(old_udp.read_packet(&mut [0; 1]).await.is_err());
+        // The adapter reconnects even before another application dial arrives.
+        gateway.attempts.wait_for(|n| *n == 2).await.unwrap();
+        let cancelled_proxy = Arc::clone(&proxy);
+        let cancelled = tokio::spawn(async move { cancelled_proxy.dial_tcp(&metadata()).await });
+        tokio::task::yield_now().await; cancelled.abort(); let _ = cancelled.await;
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..7 {
+            let proxy = Arc::clone(&proxy); let target = target.clone();
+            tasks.spawn(async move {
+                let mut tcp = proxy.dial_tcp(&target).await.unwrap();
+                tcp.write_all(b"new").await.unwrap(); let mut reply = [0; 3]; tcp.read_exact(&mut reply).await.unwrap(); assert_eq!(&reply, b"new");
+            });
+        }
+        gateway.gate.add_permits(1);
+        while let Some(result) = tasks.join_next().await { result.unwrap(); }
+        assert_eq!(*gateway.attempts.borrow(), 2);
+        assert!(old_tcp.write_all(b"must not cross generations").await.is_err());
+        assert!(old_udp.write_packet(b"must not cross generations", &udp_target).await.is_err());
+        let new_udp = proxy.dial_udp(&metadata()).await.unwrap();
+        assert_eq!(new_udp.local_addr().unwrap().ip(), "192.0.2.3".parse::<std::net::IpAddr>().unwrap());
+        new_udp.write_packet(&[0; 1253], &udp_target).await.unwrap();
+        let mut new_dns_seen = false;
+        while let Ok((generation, packet)) = packets.try_recv() {
+            if generation != 2 { continue; }
+            if packet[0] >> 4 == 4 { assert_eq!(&packet[12..16], &[192, 0, 2, 3]); }
+            else {
+                assert_eq!(&packet[8..24], &"2001:db8::3".parse::<std::net::Ipv6Addr>().unwrap().octets());
+                if packet[6] == 17 && packet[42..44] == [0, 53] { new_dns_seen = true; }
+            }
+        }
+        assert!(new_dns_seen, "new generation must discard the DNS cache and use its newly pushed server");
+        drop((old_tcp, old_udp, new_udp, proxy));
+        gateway.closed.wait_for(|n| *n == 2).await.unwrap();
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn transient_failures_have_bounded_retry_and_terminal_result_is_shared() {
+    tokio::time::timeout(Duration::from_secs(25), async {
+        let gateway = Gateway::start(false).await;
+        gateway.status.send_replace(503);
+        let config = meow_config::load_config_from_str(&gateway.yaml("fixture-cookie"))
+            .await
+            .unwrap();
+        let proxy = config.proxies.get("vpn").unwrap();
+        let target = metadata();
+        let (first, second) = tokio::join!(proxy.dial_tcp(&target), proxy.dial_tcp(&target));
+        assert!(first.is_err() && second.is_err());
+        assert_eq!(*gateway.attempts.borrow(), 5);
+        assert!(proxy.dial_tcp(&metadata()).await.is_err());
+        assert_eq!(*gateway.attempts.borrow(), 5);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn dropping_adapter_during_initialization_releases_the_transport() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut gateway = Gateway::start(true).await;
+        let config = meow_config::load_config_from_str(&gateway.yaml("fixture-cookie"))
+            .await
+            .unwrap();
+        let proxy = Arc::clone(config.proxies.get("vpn").unwrap());
+        drop(config);
+        let waiting = tokio::spawn(async move { proxy.dial_tcp(&metadata()).await });
+        gateway.attempts.wait_for(|n| *n == 1).await.unwrap();
+        waiting.abort();
+        let _ = waiting.await;
+        gateway.gate.add_permits(1);
+        gateway.closed.wait_for(|n| *n == 1).await.unwrap();
+        assert_eq!(*gateway.attempts.borrow(), 1);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn password_authentication_and_group_selection_share_one_initialization() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let gateway = Gateway::start(false).await;
+        let yaml = gateway.yaml("fixture-cookie").replace("    cookie: fixture-cookie", "    username: fixture-user\n    password: fixture-password\n    authgroup: Engineering");
+        let config = meow_config::load_config_from_str(&yaml).await.unwrap();
+        let proxy = Arc::clone(config.proxies.get("vpn").unwrap());
+        assert_eq!(*gateway.attempts.borrow(), 0);
+        let mut tasks = tokio::task::JoinSet::new();
+        for _ in 0..8 {
+            let proxy = Arc::clone(&proxy);
+            tasks.spawn(async move {
+                let mut tcp = proxy.dial_tcp(&metadata()).await.unwrap();
+                tcp.write_all(b"authenticated").await.unwrap();
+                let mut reply = [0; 13]; tcp.read_exact(&mut reply).await.unwrap();
+                assert_eq!(&reply, b"authenticated");
+            });
+        }
+        while let Some(result) = tasks.join_next().await { result.unwrap(); }
+        assert_eq!(*gateway.attempts.borrow(), 1);
+        let bad = meow_config::load_config_from_str(&yaml.replace("fixture-password", "bad-password")).await.unwrap();
+        for _ in 0..3 {
+            let error = bad.proxies.get("vpn").unwrap().dial_tcp(&metadata()).await.err().unwrap();
+            assert!(!error.to_string().contains("bad-password"));
+        }
+        assert_eq!(*gateway.attempts.borrow(), 2, "authentication rejection is not retried");
+    }).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

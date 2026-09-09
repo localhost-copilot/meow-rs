@@ -576,6 +576,14 @@ impl BoringInner {
                         }
                     }
                 }
+                if let Some(error) = e.as_io_error() {
+                    // Preserve transport failures for callers with bounded retry
+                    // policies; certificate/protocol failures remain TLS errors.
+                    return Err(TransportError::Io(std::io::Error::new(
+                        error.kind(),
+                        error.to_string(),
+                    )));
+                }
                 Err(TransportError::Tls(format!("boring TLS handshake: {e}")))
             }
         }

@@ -63,6 +63,12 @@ impl ProxyAdapter for WrappedProxy {
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
         self.adapter.dial_udp(metadata).await
     }
+    async fn resolve_udp_destination(
+        &self,
+        metadata: &Metadata,
+    ) -> Result<Option<meow_common::adapter::ResolvedUdpDestination>> {
+        self.adapter.resolve_udp_destination(metadata).await
+    }
     async fn connect_over(
         &self,
         stream: Box<dyn ProxyConn>,
@@ -319,7 +325,10 @@ fn parse_openconnect(
         _kind: String,
         server: String,
         port: Option<u16>,
-        cookie: String,
+        cookie: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+        authgroup: Option<String>,
         protocol: Option<String>,
         server_name: Option<String>,
         ca: Option<String>,
@@ -331,6 +340,7 @@ fn parse_openconnect(
         compression: Option<String>,
         dialer_proxy: Option<String>,
         remote_dns_resolve: Option<bool>,
+        dns: Option<Vec<String>>,
     }
     let value = serde_yaml::to_value(config)
         .map_err(|_| "openconnect: invalid configuration".to_owned())?;
@@ -345,13 +355,8 @@ fn parse_openconnect(
     if options.compression.as_deref().unwrap_or("off") != "off" {
         return Err("openconnect: compression is not supported".into());
     }
-    if options.ipv6_disabled == Some(false)
-        || options.remote_dns_resolve == Some(true)
-        || options.dialer_proxy.is_some()
-    {
-        return Err(
-            "openconnect: IPv6, remote-dns-resolve and dialer-proxy are not supported yet".into(),
-        );
+    if options.dialer_proxy.is_some() {
+        return Err("openconnect: dialer-proxy is not supported".into());
     }
     // The first version accepts a bare DNS name or IP literal, not a URL with
     // ambiguous group/path or port precedence. The CSTP endpoint path is fixed.
@@ -376,6 +381,36 @@ fn parse_openconnect(
     } else {
         Vec::new()
     };
+    let credentials = match (options.username, options.password, options.authgroup) {
+        (None, None, None) => None,
+        (Some(username), Some(password), authgroup) if options.cookie.is_none() => {
+            Some(meow_proxy::openconnect_adapter::Credentials {
+                username,
+                password,
+                authgroup,
+            })
+        }
+        _ => {
+            return Err(
+                "openconnect: use either cookie or username/password with optional authgroup"
+                    .into(),
+            )
+        }
+    };
+    let dns = options
+        .dns
+        .unwrap_or_default()
+        .iter()
+        .map(|server| {
+            server
+                .parse::<std::net::IpAddr>()
+                .map(|ip| std::net::SocketAddr::new(ip, 53))
+                .or_else(|_| server.parse::<std::net::SocketAddr>())
+                .map_err(|_| {
+                    "openconnect: DNS servers must be IP literals with optional ports".to_owned()
+                })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     meow_proxy::openconnect_adapter::OpenConnectAdapter::new(
         &options.name,
         meow_proxy::openconnect_adapter::Options {
@@ -385,12 +420,16 @@ fn parse_openconnect(
             server: options.server,
             port: options.port.unwrap_or(443),
             cookie: options.cookie,
+            credentials,
             additional_roots: roots,
             mtu: options.mtu.unwrap_or(1400),
             handshake_timeout: std::time::Duration::from_secs(
                 options.handshake_timeout.unwrap_or(15),
             ),
             udp: options.udp.unwrap_or(true),
+            ipv6: !options.ipv6_disabled.unwrap_or(true),
+            remote_dns_resolve: options.remote_dns_resolve.unwrap_or(false),
+            dns,
         },
     )
     .map_err(|e| format!("openconnect: {e}"))
