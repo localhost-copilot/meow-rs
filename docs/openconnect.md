@@ -6,8 +6,13 @@ IPv4/IPv6 TCP/UDP 流量送入 VPN。支持 authgroup、VPN DNS 和有界重连�
 不修改系统路由或 DNS。
 
 目前是显式启用的 `openconnect` Cargo feature，不包含在默认 `full` 或 `minimal` 中。
-CSTP 沿用 meow 的 BoringSSL TLS 层。阶段 3 的 DTLS 后端已接入，仍在补充
-故障切换与性能验收；构建和运行条件见下文。
+CSTP 沿用 meow 的 BoringSSL TLS 层。可选 OpenSSL DTLS 后端已通过真实 ocserv
+互通、UDP 阻断与恢复测试；构建和运行条件见下文。
+
+同配置 mihomo 对比和原始数据见 [性能报告](benchmarks/openconnect-dtls-2026-09-09.md)。
+当前 DTLS 会话使用 32 KiB 共享 TCP 发送预算来限制突发，每流至少保留一个 MTU；
+这能减少网关 UDP 接收缓冲溢出，但可能限制高带宽、高延迟链路的吞吐。
+`auto` 在同一会话内回退 TLS 时保留该预算。当前本地基准不代表 WAN 性能已经对齐。
 
 ## 构建与配置
 
@@ -96,7 +101,7 @@ curl -fsS --max-time 30 --proxy socks5h://127.0.0.1:18080 \
 真实节点 smoke 应按根 [AGENTS.md](../AGENTS.md) 再做 HTTP/1.1 对照，必须手动 opt-in，
 不能放入 CI。本文命令是使用说明，不代表已经执行真实节点验证。
 
-## DTLS（阶段 3 验收中）
+## DTLS
 
 ```bash
 cargo build --release -p meow-app --features openconnect-dtls
@@ -105,8 +110,9 @@ cargo build --release -p meow-app --features openconnect-dtls
 此 feature 隐含 `openconnect`，不加入默认构建。运行时需要 OpenSSL 3 的共享库：
 macOS 使用 Homebrew OpenSSL 3，glibc Linux 使用系统 `libssl.so.3`。
 为避免与 BoringSSL 的同名 C 符号混用，后端通过独立库句柄解析 OpenSSL API；
-glibc 使用 deep binding。当前真实互通验证在 macOS ARM64 上完成，Linux 打包验证
-尚待执行；musl、Windows、BSD 不在本阶段已验证支持范围。
+glibc 使用 deep binding。macOS ARM64 与 Debian glibc Linux 已通过真实互通验证；
+Linux 同时验证了 Rust 1.89 构建及 OpenSSL 3.0.20 运行。
+musl、Windows、BSD 不在本阶段已验证支持范围。
 
 | `dtls-mode` | 行为 |
 | --- | --- |
@@ -124,13 +130,26 @@ glibc 使用 deep binding。当前真实互通验证在 macOS ARM64 上完成，
 已验证：真实 ocserv 1.3.0 / GnuTLS 3.8.9 的现代 PSK，包含 VPN DNS、IPv4/IPv6
 TCP/UDP；参考网关的 App-ID PSK 与 ChaCha20-Poly1305 注入恢复。
 独立 OpenSSL 服务端的首包丢失重传和双向数据报，以及 UDP 黑洞截止测试通过。
-旧 Cisco DTLS 未列入支持范围。完整故障切换验收和 ocserv benchmark 尚未完成。
+`auto` 已验证 UDP 阻断后原 TCP/UDP socket 继续通过 TLS 工作，解除阻断后重新
+进入 DTLS；`require` 已验证原 socket 失败，不向 TLS 重放不确定是否送达的数据报。
+参考网关的错误 PSK／恢复密钥拒绝测试通过。旧 Cisco DTLS 未列入支持范围。
+
+真实 ocserv 的吞吐、延迟、服务器计数和 mihomo 同配置对比见
+[性能报告](benchmarks/openconnect-dtls-2026-09-09.md)。基准是显式运行的 ignored
+测试，不访问外部 VPN，也不在 CI 中运行真实节点测试。
 
 ```bash
 docker build -t meow-openconnect-ocserv:test tests/openconnect
 cargo test --locked -p meow-app --no-default-features \
   --features openconnect-dtls,listener-mixed --test openconnect_e2e \
   independent_ocserv_dtls -- --ignored --nocapture
+```
+
+完整 ocserv 故障测试使用筛选器 `independent_ocserv`；Linux 客户端验证：
+
+```bash
+docker build -f tests/openconnect/Dockerfile.client -t meow-openconnect-client:test .
+bash tests/openconnect/test_linux.sh
 ```
 
 ## 当前契约与限制

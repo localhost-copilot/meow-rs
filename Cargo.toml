@@ -26,6 +26,18 @@ codegen-units = 1
 panic = "abort"
 opt-level = "z"
 
+# OpenConnect's userspace packet path is sensitive to checksum and per-packet
+# dispatch costs; keep speed optimizations here while retaining the size policy
+# for the rest of the app.
+[profile.release.package.smoltcp]
+opt-level = 3
+
+[profile.release.package.meow-netstack]
+opt-level = 3
+
+[profile.release.package.meow-openconnect]
+opt-level = 3
+
 # Profile for dhat heap profiling — keeps debug symbols, no strip, no LTO.
 [profile.dhat]
 inherits = "release"

@@ -75,6 +75,7 @@ async fn run_data(
     let mut tick = tokio::time::interval_at(Instant::now() + period, period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let rekey = Instant::now() + parameters.rekey.unwrap_or(Duration::from_secs(86400 * 365));
+    let mut data = Vec::with_capacity(usize::from(network.mtu) + 1);
     loop {
         enum Event {
             Out(Option<Vec<u8>>),
@@ -99,7 +100,7 @@ async fn run_data(
             Event::Out(Some(packet)) => {
                 network.validate_packet(&packet)?;
                 if let Some(active) = &mut channel {
-                    let mut data = Vec::with_capacity(packet.len() + 1);
+                    data.clear();
                     data.push(0);
                     data.extend_from_slice(&packet);
                     failure = send(active, &data).await.err();
@@ -121,15 +122,13 @@ async fn run_data(
                 incoming.send(packet).await.map_err(|_| crate::closed())?;
             }
             Event::Out(None) | Event::Tls(None) => return Err(crate::closed()),
-            Event::Dtls(Ok(packet)) => {
+            Event::Dtls(Ok(mut packet)) => {
                 received = Instant::now();
                 match packet.first() {
                     Some(0) => {
                         network.validate_packet(&packet[1..])?;
-                        incoming
-                            .send(packet[1..].to_vec())
-                            .await
-                            .map_err(|_| crate::closed())?;
+                        packet.remove(0);
+                        incoming.send(packet).await.map_err(|_| crate::closed())?;
                     }
                     Some(3) => failure = send(channel.as_mut().expect("active"), &[4]).await.err(),
                     Some(4 | 7) => {}

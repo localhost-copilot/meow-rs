@@ -68,6 +68,26 @@ impl Stack {
         incoming: mpsc::Receiver<Vec<u8>>,
         outgoing: mpsc::Sender<Vec<u8>>,
     ) -> io::Result<Self> {
+        Self::with_tcp_send_budget(address, address6, mtu, usize::MAX, incoming, outgoing)
+    }
+
+    /// Share a soft TCP send budget across open flows. Each flow may queue at
+    /// least one MTU and at most 32 KiB; already queued bytes drain normally
+    /// when new flows reduce its share. Socket buffers remain 32 KiB in each
+    /// direction. A finite budget bounds bursts but can limit throughput on
+    /// paths with a large bandwidth-delay product; `usize::MAX` disables it.
+    /// Address/MTU validation follows [`Self::with_addresses`]; requires Tokio.
+    pub fn with_tcp_send_budget(
+        address: Option<Ipv4Addr>,
+        address6: Option<Ipv6Addr>,
+        mtu: u16,
+        tcp_send_budget: usize,
+        incoming: mpsc::Receiver<Vec<u8>>,
+        outgoing: mpsc::Sender<Vec<u8>>,
+    ) -> io::Result<Self> {
+        if tcp_send_budget < usize::from(mtu) {
+            return Err(invalid("userspace TCP send budget is smaller than MTU"));
+        }
         if address.is_none() && address6.is_none()
             || address
                 .is_some_and(|ip| ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast())
@@ -83,7 +103,14 @@ impl Stack {
         let cancel = CancellationToken::new();
         let wake = Arc::new(Notify::new());
         let failure = Arc::new(Mutex::new(None));
-        let actor = driver::Driver::new(address, address6, mtu, rx, Arc::clone(&wake));
+        let actor = driver::Driver::new(
+            address,
+            address6,
+            mtu,
+            tcp_send_budget,
+            rx,
+            Arc::clone(&wake),
+        );
         let stack = Self(Arc::new(Lifetime {
             commands: tx,
             cancel: cancel.clone(),

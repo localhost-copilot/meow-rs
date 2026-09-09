@@ -175,6 +175,71 @@ async fn tunnel_failure_wakes_active_tcp_and_udp() {
 }
 
 #[tokio::test]
+async fn shared_tcp_send_budget_recovers_loss_across_concurrent_flows() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let (outgoing, mut packets) = mpsc::channel::<Vec<u8>>(4);
+        let (to_peer, peer_in) = mpsc::channel(4);
+        let (peer_out, incoming) = mpsc::channel(4);
+        let peer = tokio::spawn(peer::run(peer_in, peer_out, CancellationToken::new()));
+        let relay = tokio::spawn(async move {
+            let mut dropped = false;
+            while let Some(packet) = packets.recv().await {
+                let ip = smoltcp::wire::Ipv4Packet::new_checked(&packet[..]).unwrap();
+                let tcp = smoltcp::wire::TcpPacket::new_checked(ip.payload()).unwrap();
+                if !dropped && !tcp.payload().is_empty() {
+                    dropped = true;
+                    continue;
+                }
+                if to_peer.send(packet).await.is_err() {
+                    break;
+                }
+            }
+            dropped
+        });
+        let stack = Stack::with_tcp_send_budget(
+            Some(Ipv4Addr::new(192, 0, 2, 2)),
+            None,
+            1280,
+            32 * 1024,
+            incoming,
+            outgoing,
+        )
+        .unwrap();
+        let mut flows = tokio::task::JoinSet::new();
+        for id in 0..4 {
+            let stack = stack.clone();
+            flows.spawn(async move {
+                let tcp = stack
+                    .connect(SocketAddr::new(peer::ADDRESS.into(), peer::TCP_PORT))
+                    .await
+                    .unwrap();
+                let (mut read, mut write) = tokio::io::split(tcp);
+                let payload: Vec<u8> = (0..131072).map(|n| ((n + id) % 251) as u8).collect();
+                let send = async {
+                    write.write_all(&payload).await.unwrap();
+                    write.shutdown().await.unwrap();
+                };
+                let receive = async {
+                    let mut answer = Vec::new();
+                    read.read_to_end(&mut answer).await.unwrap();
+                    assert_eq!(answer, payload);
+                };
+                tokio::join!(send, receive);
+            });
+        }
+        while let Some(result) = flows.join_next().await {
+            result.unwrap();
+        }
+        stack.close();
+        stack.closed().await;
+        assert!(relay.await.unwrap(), "the loss path must be exercised");
+        peer.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn dropping_cancelled_connect_releases_stack() {
     let (outgoing, mut packets) = mpsc::channel(4);
     let (_incoming, receiver) = mpsc::channel(4);
@@ -194,6 +259,132 @@ async fn dropping_cancelled_connect_releases_stack() {
     drop(stack);
     tokio::time::timeout(Duration::from_secs(2), async {
         while packets.recv().await.is_some() {}
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn new_flow_waits_for_send_credits_held_by_existing_flow() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (outgoing, mut packets) = mpsc::channel::<Vec<u8>>(4);
+        let (to_peer, peer_in) = mpsc::channel(4);
+        let (peer_out, mut replies) = mpsc::channel::<Vec<u8>>(4);
+        let (to_stack, incoming) = mpsc::channel(4);
+        let (release, mut released) = tokio::sync::watch::channel(false);
+        let outgoing_released = released.clone();
+        let (total_tx, mut total_rx) = tokio::sync::watch::channel(0usize);
+        let (exceeded_tx, exceeded_rx) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(peer::run(peer_in, peer_out, CancellationToken::new()));
+        let forward = tokio::spawn(async move {
+            let mut seen = std::collections::HashMap::<u16, (i32, Vec<bool>)>::new();
+            let mut total = 0;
+            let mut exceeded = Some(exceeded_tx);
+            while let Some(packet) = packets.recv().await {
+                let ip = smoltcp::wire::Ipv4Packet::new_checked(&packet[..]).unwrap();
+                let tcp = smoltcp::wire::TcpPacket::new_checked(ip.payload()).unwrap();
+                if tcp.syn() {
+                    seen.entry(tcp.src_port())
+                        .or_insert_with(|| (tcp.seq_number().0.wrapping_add(1), Vec::new()));
+                }
+                // Retransmissions can use different segment boundaries. Count
+                // unique sequence bytes, not distinct packet representations.
+                if !tcp.payload().is_empty() {
+                    let (base, covered) = seen.get_mut(&tcp.src_port()).expect("SYN precedes data");
+                    let offset = tcp.seq_number().0.wrapping_sub(*base);
+                    // A keepalive probe at SND.UNA - 1 is not application data.
+                    if offset >= 0 {
+                        let offset = offset as usize;
+                        let end = offset + tcp.payload().len();
+                        assert!(end <= 32768);
+                        covered.resize(covered.len().max(end), false);
+                        for byte in &mut covered[offset..end] {
+                            if !*byte {
+                                *byte = true;
+                                total += 1;
+                            }
+                        }
+                    }
+                    total_tx.send_replace(total);
+                    if total > 16384 && !*outgoing_released.borrow() {
+                        if let Some(signal) = exceeded.take() {
+                            let _ = signal.send(());
+                        }
+                    }
+                }
+                if to_peer.send(packet).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let backward = tokio::spawn(async move {
+            let mut held = Vec::new();
+            let mut open = false;
+            loop {
+                tokio::select! {
+                    result = released.changed(), if !open => {
+                        result.unwrap();
+                        open = *released.borrow();
+                        if open {
+                            for packet in held.drain(..) {
+                                if to_stack.send(packet).await.is_err() { return; }
+                            }
+                        }
+                    },
+                    packet = replies.recv() => {
+                        let Some(packet) = packet else { break; };
+                        let ip = smoltcp::wire::Ipv4Packet::new_checked(&packet[..]).unwrap();
+                        let tcp = smoltcp::wire::TcpPacket::new_checked(ip.payload()).unwrap();
+                        // New handshakes remain possible while data ACKs are held.
+                        if open || tcp.syn() {
+                            if to_stack.send(packet).await.is_err() { break; }
+                        } else { held.push(packet); }
+                    }
+                }
+            }
+        });
+        let stack = Stack::with_tcp_send_budget(
+            Some(Ipv4Addr::new(192, 0, 2, 2)),
+            None,
+            1280,
+            16384,
+            incoming,
+            outgoing,
+        )
+        .unwrap();
+        let target = SocketAddr::new(peer::ADDRESS.into(), peer::TCP_PORT);
+        let mut first = stack.connect(target).await.unwrap();
+        first.write_all(&vec![11; 16384]).await.unwrap();
+        total_rx.wait_for(|total| *total >= 16384).await.unwrap();
+        let mut second = stack.connect(target).await.unwrap();
+        second.write_all(&vec![22; 8192]).await.unwrap();
+        // With ACKs withheld, admitting the new flow must not exceed the total
+        // budget. This bounded absence check also spans possible retransmissions.
+        let result = tokio::time::timeout(Duration::from_millis(30), exceeded_rx).await;
+        assert!(
+            result.is_err(),
+            "send budget exceeded or relay closed: {result:?}"
+        );
+        release.send_replace(true);
+        let receive_first = async {
+            first.shutdown().await.unwrap();
+            let mut answer = Vec::new();
+            first.read_to_end(&mut answer).await.unwrap();
+            assert_eq!(answer, vec![11; 16384]);
+        };
+        let receive_second = async {
+            second.shutdown().await.unwrap();
+            let mut answer = Vec::new();
+            second.read_to_end(&mut answer).await.unwrap();
+            assert_eq!(answer, vec![22; 8192]);
+        };
+        tokio::join!(receive_first, receive_second);
+        drop((first, second));
+        stack.close();
+        stack.closed().await;
+        forward.await.unwrap();
+        peer.await.unwrap();
+        backward.await.unwrap();
     })
     .await
     .unwrap();

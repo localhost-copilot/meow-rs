@@ -364,10 +364,21 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
     let connection = meow_openconnect::connect(tls, &request).await?;
     let (to_stack, incoming) = mpsc::channel(64);
     let (outgoing, from_stack) = mpsc::channel(64);
-    let stack = Stack::with_addresses(
+    let tcp_send_budget = usize::MAX;
+    #[cfg(all(feature = "openconnect-dtls", unix))]
+    let tcp_send_budget = if dtls.is_some() {
+        // Share a burst budget across flows into the datagram carrier. Larger windows
+        // overflow ocserv's UDP receive buffer under concurrent TCP traffic,
+        // and smoltcp's loss recovery can then dominate the transfer time.
+        32 * 1024
+    } else {
+        tcp_send_budget
+    };
+    let stack = Stack::with_tcp_send_budget(
         connection.network.address,
         connection.network.address6,
         connection.network.mtu,
+        tcp_send_budget,
         incoming,
         outgoing,
     )?;

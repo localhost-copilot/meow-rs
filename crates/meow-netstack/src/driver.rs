@@ -65,6 +65,7 @@ pub(crate) struct Driver {
     commands: mpsc::Receiver<Command>,
     wake: Arc<Notify>,
     next_port: u16,
+    tcp_send_budget: usize,
 }
 
 impl Driver {
@@ -72,6 +73,7 @@ impl Driver {
         address: Option<Ipv4Addr>,
         address6: Option<Ipv6Addr>,
         mtu: u16,
+        tcp_send_budget: usize,
         commands: mpsc::Receiver<Command>,
         wake: Arc<Notify>,
     ) -> Self {
@@ -117,6 +119,7 @@ impl Driver {
             commands,
             wake,
             next_port: 49152,
+            tcp_send_budget,
         }
     }
 
@@ -244,6 +247,21 @@ impl Driver {
                     })
             };
             let wake = Arc::clone(&self.wake);
+            let tcp_flows = self
+                .entries
+                .iter()
+                .filter(|entry| {
+                    if !matches!(entry.socket, Socket::Tcp(_)) || entry.flow.cancel.is_cancelled() {
+                        return false;
+                    }
+                    let socket = self.sockets.get::<tcp::Socket>(entry.handle);
+                    socket.may_send() || socket.send_queue() != 0
+                })
+                .count()
+                .max(1);
+            let tcp_send_limit =
+                (self.tcp_send_budget / tcp_flows).clamp(self.device.mtu, SOCKET_BUFFER);
+            let tcp_total_limit = self.tcp_send_budget.max(tcp_flows * self.device.mtu);
             // All bridge and channel wakers are registered in this same select.
             // A full packet sink never blocks command handling or tunnel reads.
             tokio::select! {
@@ -259,7 +277,7 @@ impl Driver {
                 permit = outgoing.reserve(), if !self.device.outgoing.is_empty() => {
                     permit.map_err(|_| closed())?.send(self.device.outgoing.pop_front().expect("nonempty queue"));
                 },
-                _ = poll_fn(|cx| Self::pump(&mut self.entries, &mut self.sockets, cx)) => {},
+                _ = poll_fn(|cx| Self::pump(&mut self.entries, &mut self.sockets, tcp_send_limit, tcp_total_limit, cx)) => {},
             }
         }
     }
@@ -267,9 +285,19 @@ impl Driver {
     fn pump(
         entries: &mut Vec<Entry>,
         sockets: &mut SocketSet<'static>,
+        tcp_send_limit: usize,
+        tcp_total_limit: usize,
         cx: &mut Context<'_>,
     ) -> Poll<()> {
         let mut progress = false;
+        // A new flow must wait for credits held by older flows, whose queued
+        // bytes cannot be recalled when their per-flow share shrinks.
+        let queued: usize = entries
+            .iter()
+            .filter(|entry| matches!(entry.socket, Socket::Tcp(_)))
+            .map(|entry| sockets.get::<tcp::Socket>(entry.handle).send_queue())
+            .sum();
+        let mut send_available = tcp_total_limit.saturating_sub(queued);
         entries.retain_mut(|entry| {
             let mut retain = !entry.flow.cancel.is_cancelled();
             if matches!(entry.socket, Socket::RetiringTcp) {
@@ -286,6 +314,8 @@ impl Driver {
                         tcp,
                         sockets.get_mut(entry.handle),
                         &entry.flow,
+                        tcp_send_limit,
+                        &mut send_available,
                         cx,
                         &mut progress,
                     ),
@@ -324,6 +354,8 @@ fn pump_tcp(
     entry: &mut Tcp,
     socket: &mut tcp::Socket<'_>,
     flow: &Flow,
+    send_limit: usize,
+    send_available: &mut usize,
     cx: &mut Context<'_>,
     progress: &mut bool,
 ) -> bool {
@@ -373,8 +405,14 @@ fn pump_tcp(
         socket.abort();
         return false;
     }
-    if !entry.local_eof && socket.can_send() {
-        let capacity = (socket.send_capacity() - socket.send_queue()).min(8192);
+    if !entry.local_eof
+        && socket.can_send()
+        && socket.send_queue() < send_limit
+        && *send_available != 0
+    {
+        let capacity = (send_limit - socket.send_queue())
+            .min(*send_available)
+            .min(8192);
         let mut scratch = [0; 8192];
         let mut buffer = ReadBuf::new(&mut scratch[..capacity]);
         match Pin::new(&mut entry.bridge).poll_read(cx, &mut buffer) {
@@ -386,6 +424,8 @@ fn pump_tcp(
                 } else if socket.send_slice(buffer.filled()).is_err() {
                     socket.abort();
                     return false;
+                } else {
+                    *send_available -= buffer.filled().len();
                 }
                 *progress = true;
             }

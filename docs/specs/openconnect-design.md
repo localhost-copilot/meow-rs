@@ -1,6 +1,6 @@
 # OpenConnect 出站设计
 
-状态：阶段 1、2 已完成；阶段 3 后端与基础互通已实现，故障切换和性能验收进行中。
+状态：阶段 1、2 已完成；阶段 3 的互通、丢包、UDP 阻断与切换测试已通过。已完成同配置 mihomo 基准对比，持续 DTLS 吞吐尚未完全对齐。
 
 日期：2026-09-09
 
@@ -187,10 +187,31 @@ Tokio AsyncFd 驱动非阻塞 datagram BIO 和 OpenSSL 握手重传计时器，�
 macOS ARM64 上已通过真实 ocserv 的现代 PSK（VPN DNS、双栈 TCP/UDP）和参考
 网关的 App-ID PSK、ChaCha20-Poly1305 注入恢复。独立 OpenSSL 服务端的握手
 首包丢失与双向数据报测试、UDP 黑洞截止测试通过。三种模式和切换逻辑已接入。
-阶段 3 尚未完成：完整故障切换验收、Linux 打包验证，以及真实 ocserv Docker 的
-TLS/DTLS benchmark 仍待交付；不把基础连通结果当作完整验收。
+真实 ocserv 的 `auto` UDP 阻断／TLS 回退／DTLS 恢复已验证，原 TCP/UDP socket
+保持可用；`require` 阻断时原 socket 失败，业务数据不回退 TLS。错误 PSK 和错误
+注入恢复密钥被独立参考网关拒绝。Debian glibc / Rust 1.89 / OpenSSL 3.0.20
+已通过实际 Linux 客户端、VPN DNS 和双栈 SOCKS HTTP 验证。
+真实 Docker ocserv 的 TLS/DTLS benchmark 与 mihomo 对比记录见
+[性能报告](../benchmarks/openconnect-dtls-2026-09-09.md)。
 
 ## 7. 配置与 Cargo 接入
+
+### 与 mihomo 的性能验收
+
+最终目标是在相同配置和负载下达到 mihomo 的性能水平。基准使用用户指定的
+本地 mihomo checkout，记录 commit、Go/Rust 版本与构建选项。两边运行独立
+release 进程，经同一 SOCKS5 客户端驱动访问相同镜像构建的真实 ocserv；固定
+worker 数、MTU、认证方式、压缩、IP 协议族及 `dtls-mode`。CA 字段的文件路径／
+PEM 表示差异只做语法转换，信任证书相同。
+
+分别测量 TLS 与 DTLS 的单流／四流 TCP 吞吐、UDP 窗口吞吐和丢包、TCP／UDP
+回显延迟 p50/p95/p99。所有载荷校验内容、UDP 检查重复；服务器独立核验实际
+协商通道与 MTU。预热后多轮采样，交替运行两种内核，保留原始数据和样本范围。
+优先定位稳定超过测量波动的差距，不用单次峰值宣称达到性能目标。
+
+出现差距时先区分网络／socket 缓冲丢包、用户态 TCP 栈、任务调度和加密开销，
+每次改动用相同基准验证，并回归 DTLS 故障切换、取消和资源释放行为。
+本机低延迟 Docker 结果只代表该环境；WAN 延迟、丢包和更多并发需要单独报告。
 
 以下展示阶段 1 的核心配置；构建方式、完整示例和字段限制见
 [使用说明](../openconnect.md)。占位 Cookie 需要替换，meow 不因此新增环境变量插值语义。
