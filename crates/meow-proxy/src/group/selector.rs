@@ -12,6 +12,7 @@ pub struct SelectorGroup {
     name: SmolStr,
     static_proxies: Vec<Arc<dyn Proxy>>,
     provider_slots: Vec<ProviderSlot>,
+    empty_fallback: Option<Arc<dyn Proxy>>,
     /// Name of the currently selected proxy; `None` means use the first.
     selected: RwLock<Option<SmolStr>>,
     /// Optional write-through persistence; primed at construction.
@@ -25,6 +26,7 @@ impl SelectorGroup {
             name: SmolStr::from(name),
             static_proxies: proxies,
             provider_slots: Vec::new(),
+            empty_fallback: None,
             selected: RwLock::new(None),
             store: None,
             health: ProxyHealth::new(),
@@ -40,10 +42,17 @@ impl SelectorGroup {
             name: SmolStr::from(name),
             static_proxies: proxies,
             provider_slots: slots,
+            empty_fallback: None,
             selected: RwLock::new(None),
             store: None,
             health: ProxyHealth::new(),
         }
+    }
+
+    /// Use this leaf proxy only while all configured members are absent.
+    pub fn with_empty_fallback(mut self, proxy: Arc<dyn Proxy>) -> Self {
+        self.empty_fallback = Some(proxy);
+        self
     }
 
     /// Attach a persistent store. The previously-saved choice (if any) is
@@ -59,6 +68,17 @@ impl SelectorGroup {
     }
 
     fn contains_name(&self, name: &str) -> bool {
+        if self.static_proxies.is_empty()
+            && self
+                .provider_slots
+                .iter()
+                .all(|slot| slot.read().is_empty())
+        {
+            return self
+                .empty_fallback
+                .as_ref()
+                .is_some_and(|proxy| proxy.name() == name);
+        }
         if self.static_proxies.iter().any(|p| p.name() == name) {
             return true;
         }
@@ -89,6 +109,11 @@ impl SelectorGroup {
     /// `Vec`. Walks `static_proxies` then provider slots; falls back to the
     /// first proxy if `selected` is unset or names something no longer present.
     pub fn selected_proxy(&self) -> Option<Arc<dyn Proxy>> {
+        self.selected_proxy_member()
+            .or_else(|| self.empty_fallback.clone())
+    }
+
+    fn selected_proxy_member(&self) -> Option<Arc<dyn Proxy>> {
         let sel: Option<SmolStr> = self.selected.read().clone();
         let mut first_any: Option<Arc<dyn Proxy>> = None;
         if let Some(name) = sel {
@@ -135,6 +160,11 @@ impl SelectorGroup {
             let guard = slot.read();
             for p in guard.iter() {
                 out.push(p.name().to_string());
+            }
+        }
+        if out.is_empty() {
+            if let Some(proxy) = &self.empty_fallback {
+                out.push(proxy.name().to_string());
             }
         }
         out

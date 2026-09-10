@@ -2438,6 +2438,33 @@ fn parse_proxy_group_inner(
     selector_store: Option<&Arc<meow_proxy::SelectorStore>>,
 ) -> std::result::Result<Arc<dyn Proxy>, String> {
     let mut proxies: Vec<Arc<dyn Proxy>> = Vec::new();
+    let fallback_name = config
+        .empty_fallback
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("COMPATIBLE");
+    let empty_fallback = existing_proxies
+        .get(fallback_name)
+        .cloned()
+        .or_else(|| {
+            (fallback_name == "COMPATIBLE").then(|| {
+                Arc::new(WrappedProxy::new(Box::new(
+                    DirectAdapter::new().into_compatible(),
+                ))) as Arc<dyn Proxy>
+            })
+        })
+        .ok_or_else(|| {
+            format!(
+                "group '{}': empty fallback proxy '{fallback_name}' not found",
+                config.name
+            )
+        })?;
+    if empty_fallback.members().is_some() {
+        return Err(format!(
+            "group '{}': empty-fallback must name a proxy, not a group",
+            config.name
+        ));
+    }
 
     // include_all_proxies: add all config-defined proxies to static list
     if config.include_all_proxies.unwrap_or(false) {
@@ -2500,16 +2527,10 @@ fn parse_proxy_group_inner(
             .collect()
     };
 
-    if proxies.is_empty() && slots.is_empty() {
-        return Err(format!(
-            "group '{}' has no valid proxies or providers",
-            config.name
-        ));
-    }
-
     match config.group_type.as_str() {
         "select" => {
-            let mut group = SelectorGroup::new_with_providers(&config.name, proxies, slots);
+            let mut group = SelectorGroup::new_with_providers(&config.name, proxies, slots)
+                .with_empty_fallback(empty_fallback);
             if let Some(store) = selector_store {
                 group = group.with_store(Arc::clone(store));
             }
@@ -2518,6 +2539,7 @@ fn parse_proxy_group_inner(
         "url-test" => {
             let tolerance = config.tolerance.unwrap_or(150);
             let group = UrlTestGroup::new_with_providers(&config.name, proxies, tolerance, slots)
+                .with_empty_fallback(empty_fallback)
                 .with_runtime_options(
                     config
                         .url
@@ -2530,6 +2552,7 @@ fn parse_proxy_group_inner(
         }
         "fallback" => {
             let group = FallbackGroup::new_with_providers(&config.name, proxies, slots)
+                .with_empty_fallback(empty_fallback)
                 .with_runtime_options(
                     config
                         .url
@@ -2541,6 +2564,9 @@ fn parse_proxy_group_inner(
             Ok(Arc::new(group))
         }
         "load-balance" => {
+            if proxies.is_empty() {
+                proxies.push(empty_fallback);
+            }
             let strategy = parse_lb_strategy(config.strategy.as_deref())?;
             Ok(Arc::new(LoadBalanceGroup::new(
                 &config.name,
@@ -3435,6 +3461,34 @@ tls: true
     }
 
     // ─── snell proxy parser ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn empty_group_yaml_uses_configured_leaf_fallback() {
+        let config = crate::load_config_from_str("proxy-groups:\n  - name: AI\n    type: select\n    proxies: []\n    empty-fallback: REJECT\n").await.unwrap();
+        let group = &config.proxies["AI"];
+        assert_eq!(group.members().unwrap(), vec!["REJECT"]);
+        assert_eq!(
+            group
+                .unwrap_proxy(&meow_common::Metadata::default())
+                .unwrap()
+                .adapter_type(),
+            AdapterType::Reject
+        );
+        use tokio::io::AsyncReadExt;
+        let mut conn = group
+            .dial_tcp(&meow_common::Metadata::default())
+            .await
+            .unwrap();
+        assert_eq!(conn.read(&mut [0u8; 1]).await.unwrap(), 0);
+
+        let raw = crate::raw::RawProxyGroup {
+            name: "bad".into(),
+            group_type: "select".into(),
+            empty_fallback: Some("AI".into()),
+            ..Default::default()
+        };
+        assert!(super::parse_proxy_group(&raw, &config.proxies, &HashMap::new()).is_err());
+    }
 
     #[cfg(feature = "snell")]
     fn snell_config(yaml: &str) -> HashMap<String, serde_yaml::Value> {

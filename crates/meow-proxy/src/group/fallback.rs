@@ -13,6 +13,7 @@ pub struct FallbackGroup {
     name: SmolStr,
     static_proxies: Vec<Arc<dyn Proxy>>,
     provider_slots: Vec<ProviderSlot>,
+    empty_fallback: Option<Arc<dyn Proxy>>,
     fixed: RwLock<Option<SmolStr>>,
     store: Option<Arc<SelectorStore>>,
     test_url: String,
@@ -28,6 +29,7 @@ impl FallbackGroup {
             name: SmolStr::from(name),
             static_proxies: proxies,
             provider_slots: Vec::new(),
+            empty_fallback: None,
             fixed: RwLock::new(None),
             store: None,
             test_url: "http://www.gstatic.com/generate_204".to_string(),
@@ -47,6 +49,7 @@ impl FallbackGroup {
             name: SmolStr::from(name),
             static_proxies: proxies,
             provider_slots: slots,
+            empty_fallback: None,
             fixed: RwLock::new(None),
             store: None,
             test_url: "http://www.gstatic.com/generate_204".to_string(),
@@ -55,6 +58,12 @@ impl FallbackGroup {
             usage: UsageTracker::new(),
             dial_failures: DialFailureTracker::new(),
         }
+    }
+
+    /// Use this leaf proxy only while all configured members are absent.
+    pub fn with_empty_fallback(mut self, proxy: Arc<dyn Proxy>) -> Self {
+        self.empty_fallback = Some(proxy);
+        self
     }
 
     #[must_use]
@@ -76,6 +85,18 @@ impl FallbackGroup {
     }
 
     fn find_member(&self, name: &str) -> Option<Arc<dyn Proxy>> {
+        if self.static_proxies.is_empty()
+            && self
+                .provider_slots
+                .iter()
+                .all(|slot| slot.read().is_empty())
+        {
+            return self
+                .empty_fallback
+                .as_ref()
+                .filter(|proxy| proxy.name() == name)
+                .cloned();
+        }
         for p in &self.static_proxies {
             if p.name() == name {
                 return Some(Arc::clone(p));
@@ -96,6 +117,11 @@ impl FallbackGroup {
     /// proxy of any kind if none are alive.  Walks `static_proxies` and
     /// each provider slot directly without building a unified `Vec`.
     fn first_alive(&self) -> Option<Arc<dyn Proxy>> {
+        self.first_alive_member()
+            .or_else(|| self.empty_fallback.clone())
+    }
+
+    fn first_alive_member(&self) -> Option<Arc<dyn Proxy>> {
         let fixed_name = { self.fixed.read().clone() };
         if let Some(name) = fixed_name {
             if let Some(proxy) = self.find_member(&name) {
@@ -140,6 +166,11 @@ impl FallbackGroup {
             let guard = slot.read();
             for p in guard.iter() {
                 out.push(p.name().to_string());
+            }
+        }
+        if out.is_empty() {
+            if let Some(proxy) = &self.empty_fallback {
+                out.push(proxy.name().to_string());
             }
         }
         out

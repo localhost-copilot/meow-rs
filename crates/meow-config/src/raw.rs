@@ -374,6 +374,7 @@ pub struct RawProxyGroup {
     #[serde(rename = "type")]
     pub group_type: String,
     pub proxies: Option<Vec<String>>,
+    pub empty_fallback: Option<String>,
     pub url: Option<String>,
     pub interval: Option<u64>,
     pub tolerance: Option<u16>,
