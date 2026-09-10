@@ -267,9 +267,10 @@ impl ProxyAdapter for SnellAdapter {
         }
         let mut snell = self.dial_fresh().await?;
         write_udp_header(&mut snell).await.map_err(MeowError::Io)?;
-        if self.version.supports_reuse() {
-            snell.read_reply().await.map_err(MeowError::Io)?;
-        }
+        // The v3 server can discard a datagram that arrives with the initial
+        // association header. Wait for its acknowledgement before exposing
+        // the packet connection, as we already do for v4/v5.
+        snell.read_reply().await.map_err(MeowError::Io)?;
         Ok(Box::new(SnellPacketConn::new(snell)))
     }
 
