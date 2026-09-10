@@ -50,12 +50,15 @@ macro_rules! api {
 
 api! {
     version: "OpenSSL_version_num" () -> libc::c_ulong;
+    last_error: "ERR_peek_last_error" () -> libc::c_ulong;
+    error_reason: "ERR_reason_error_string" (libc::c_ulong) -> *const c_char;
     method: "DTLS_client_method" () -> ConstPtr;
     ctx_new: "SSL_CTX_new" (ConstPtr) -> Ptr;
     ctx_free: "SSL_CTX_free" (Ptr) -> ();
     ctx_ctrl: "SSL_CTX_ctrl" (Ptr, c_int, c_long, Ptr) -> c_long;
     ctx_options: "SSL_CTX_set_options" (Ptr, u64) -> u64;
     ctx_ciphers: "SSL_CTX_set_cipher_list" (Ptr, *const c_char) -> c_int;
+    ctx_security_level: "SSL_CTX_set_security_level" (Ptr, c_int) -> ();
     ctx_psk: "SSL_CTX_set_psk_client_callback" (Ptr, Option<PskCallback>) -> ();
     ssl_new: "SSL_new" (Ptr) -> Ptr;
     ssl_free: "SSL_free" (Ptr) -> ();
@@ -173,6 +176,7 @@ pub struct Channel {
     api: Arc<Api>,
     ssl: NonNull<c_void>,
     socket: AsyncFd<UdpSocket>,
+    _guard: super::DatagramGuard,
     key: Box<Key>,
     mtu: usize,
     resumed: bool,
@@ -230,31 +234,62 @@ impl Channel {
         mtu: u16,
         budget: Duration,
     ) -> io::Result<Self> {
-        let mut channel = Self::new(peer, key, mtu)?;
+        Self::connect_bound(peer, key, mtu, budget, 0).await
+    }
+
+    pub async fn connect_bound(
+        peer: SocketAddr,
+        key: Key,
+        mtu: u16,
+        budget: Duration,
+        local_port: u16,
+    ) -> io::Result<Self> {
+        let ip = if peer.is_ipv4() {
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        } else {
+            std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+        };
+        let socket = UdpSocket::bind(SocketAddr::new(ip, local_port))?;
+        socket.connect(peer)?;
+        Self::connect_socket(
+            super::DatagramSocket {
+                socket,
+                guard: super::DatagramGuard(tokio_util::sync::CancellationToken::new()),
+            },
+            key,
+            mtu,
+            budget,
+        )
+        .await
+    }
+
+    pub async fn connect_socket(
+        socket: super::DatagramSocket,
+        key: Key,
+        mtu: u16,
+        budget: Duration,
+    ) -> io::Result<Self> {
+        let mut channel = Self::new_socket(socket, key, mtu)?;
         tokio::time::timeout(budget, channel.handshake())
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "DTLS handshake timed out"))??;
         Ok(channel)
     }
 
-    fn new(peer: SocketAddr, key: Key, mtu: u16) -> io::Result<Self> {
+    fn new_socket(datagram: super::DatagramSocket, key: Key, mtu: u16) -> io::Result<Self> {
+        let peer = datagram.socket.peer_addr()?;
         let id = match &key {
             Key::Psk { application_id, .. } => application_id,
             Key::Resume { session_id, .. } => session_id,
         };
-        if id.is_empty() || id.len() > 32 || !(576..=1500).contains(&mtu) || peer.port() == 0 {
+        if id.is_empty() || id.len() > 32 || mtu < 576 || peer.port() == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "invalid DTLS parameters",
             ));
         }
         let api = api()?;
-        let socket = UdpSocket::bind(if peer.is_ipv4() {
-            "0.0.0.0:0"
-        } else {
-            "[::]:0"
-        })?;
-        socket.connect(peer)?;
+        let socket = datagram.socket;
         socket.set_nonblocking(true)?;
         let socket = AsyncFd::new(socket)?;
         // SAFETY: each API call uses objects from this library, all buffers are
@@ -263,15 +298,37 @@ impl Channel {
             let ctx = NonNull::new((api.ctx_new)((api.method)())).ok_or_else(failed)?;
             let resumed = matches!(key, Key::Resume { .. });
             let setup = (|| {
-                check((api.ctx_ctrl)(ctx.as_ptr(), 123, 0xfefd, std::ptr::null_mut()) as c_int)?;
-                check((api.ctx_ctrl)(ctx.as_ptr(), 124, 0xfefd, std::ptr::null_mut()) as c_int)?;
+                if key.version() == 0x100 {
+                    // OpenSSL's Cisco compatibility mode implements DTLS_BAD_VER.
+                    // The session must resume the CSTP-authenticated master secret.
+                    (api.ctx_security_level)(ctx.as_ptr(), 0);
+                    (api.ctx_options)(ctx.as_ptr(), 1 << 15); // SSL_OP_CISCO_ANYCONNECT
+                }
+                check((api.ctx_ctrl)(
+                    ctx.as_ptr(),
+                    123,
+                    key.version().into(),
+                    std::ptr::null_mut(),
+                ) as c_int)?;
+                check((api.ctx_ctrl)(
+                    ctx.as_ptr(),
+                    124,
+                    key.version().into(),
+                    std::ptr::null_mut(),
+                ) as c_int)?;
                 // NO_QUERY_MTU | NO_TICKET; externally injected sessions did not
                 // negotiate EMS, so disable it only for that context.
                 (api.ctx_options)(ctx.as_ptr(), (1 << 12) | (1 << 14) | u64::from(resumed));
+                if resumed {
+                    // Injected AnyConnect sessions omit RFC 5746. Permit only the
+                    // initial connection; handshake() still requires resumption of
+                    // the CSTP-authenticated key, never a new certificate handshake.
+                    (api.ctx_options)(ctx.as_ptr(), 1 << 2); // LEGACY_SERVER_CONNECT
+                }
                 (api.ctx_ctrl)(ctx.as_ptr(), 41, 1, std::ptr::null_mut()); // read ahead
                 let ciphers = match &key {
                     Key::Psk { .. } => {
-                        c"PSK-AES128-GCM-SHA256:PSK-AES256-GCM-SHA384:PSK-CHACHA20-POLY1305"
+                        c"PSK-AES128-GCM-SHA256:PSK-AES256-GCM-SHA384:PSK-CHACHA20-POLY1305:PSK-AES128-CCM:PSK-AES128-CCM8:PSK-AES256-CCM8:PSK-AES128-CBC-SHA256"
                     }
                     Key::Resume { cipher, .. } => cipher.name(),
                 };
@@ -282,6 +339,7 @@ impl Channel {
             (api.ctx_free)(ctx.as_ptr()); // A successfully created SSL retains CTX.
             let ssl = setup?;
             let mut channel = Self {
+                _guard: datagram.guard,
                 api,
                 ssl,
                 socket,
@@ -352,7 +410,7 @@ impl Channel {
                 if cipher.is_null() {
                     return Err(failed());
                 }
-                check((api.session_version)(session.as_ptr(), 0xfefd))?;
+                check((api.session_version)(session.as_ptr(), self.key.version()))?;
                 check((api.session_cipher)(session.as_ptr(), cipher))?;
                 check((api.session_secret)(
                     session.as_ptr(),
@@ -403,7 +461,16 @@ impl Channel {
         match unsafe { (self.api.ssl_error)(self.ssl.as_ptr(), result) } {
             2 => Ok(Interest::READABLE),
             3 => Ok(Interest::WRITABLE),
-            _ => Err(failed()),
+            _ => {
+                // OpenSSL's static reason excludes peer-controlled error data and secrets.
+                let reason = unsafe { (self.api.error_reason)((self.api.last_error)()) };
+                if reason.is_null() {
+                    Err(failed())
+                } else {
+                    let reason = unsafe { CStr::from_ptr(reason) }.to_string_lossy();
+                    Err(io::Error::other(format!("OpenSSL DTLS: {reason}")))
+                }
+            }
         }
     }
 

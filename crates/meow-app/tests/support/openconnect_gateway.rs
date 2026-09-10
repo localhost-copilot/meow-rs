@@ -17,6 +17,7 @@ pub struct Gateway {
     pub disconnect: watch::Sender<u64>,
     pub packets: broadcast::Sender<(usize, Vec<u8>)>,
     pub status: watch::Sender<u16>,
+    pub requests: broadcast::Sender<(String, String)>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -70,6 +71,8 @@ impl Gateway {
         let (disconnect, disconnected) = watch::channel(0);
         let (packets, _) = broadcast::channel(256);
         let (status, worker_status) = watch::channel(200);
+        let (requests, _) = broadcast::channel(64);
+        let worker_requests = requests.clone();
         let worker_packets = packets.clone();
         let task = tokio::spawn(async move {
             loop {
@@ -80,6 +83,7 @@ impl Gateway {
                 attempt_tx.send_modify(|n| *n += 1);
                 let attempt = *attempt_tx.borrow();
                 let packets = worker_packets.clone();
+                let requests = worker_requests.clone();
                 let network = worker_network.clone();
                 let status = worker_status.clone();
                 let mut disconnected = disconnected.clone();
@@ -92,7 +96,8 @@ impl Gateway {
                     let _closed = closed;
                     let serve = async {
                         let mut tls = acceptor.accept(tcp).await.map_err(io::Error::other)?;
-                        let (mut headers, _) = request(&mut tls).await?;
+                        let (mut headers, body) = request(&mut tls).await?;
+                        let _ = requests.send((headers.clone(), body));
                         if headers.starts_with("POST / HTTP/1.1") {
                             let body = r#"<config-auth type="auth-request"><opaque><state>fixture</state></opaque><auth><form action="/auth" method="post"><input name="username" type="text"/><input name="password" type="password"/><select name="group_list"><option value="engineering">Engineering</option><option value="guest">Guest</option></select></form></auth></config-auth>"#;
                             tls.write_all(
@@ -104,6 +109,7 @@ impl Gateway {
                             )
                             .await?;
                             let (auth_headers, body) = request(&mut tls).await?;
+                            let _ = requests.send((auth_headers.clone(), body.clone()));
                             assert!(auth_headers.starts_with("POST /auth HTTP/1.1"));
                             // Protocol crate tests parse XML; this independent fixture checks the wire values.
                             if !body.contains("<username>fixture-user</username>")
@@ -120,6 +126,7 @@ impl Gateway {
                             let body = "<config-auth type=\"complete\"><auth id=\"success\"/></config-auth>";
                             tls.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nSet-Cookie: webvpn=fixture-cookie; Secure\r\n\r\n{body}", body.len()).as_bytes()).await?;
                             (headers, _) = request(&mut tls).await?;
+                            let _ = requests.send((headers.clone(), String::new()));
                         }
                         assert!(headers.starts_with("CONNECT /CSCOSSLC/tunnel HTTP/1.1\r\n"));
                         if !headers.contains("Cookie: webvpn=fixture-cookie\r\n") {
@@ -210,6 +217,7 @@ impl Gateway {
             disconnect,
             packets,
             status,
+            requests,
         }
     }
 

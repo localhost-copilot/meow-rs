@@ -18,6 +18,145 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
+#[tokio::test]
+async fn yaml_dialer_proxy_carries_the_authenticated_tunnel() {
+    use tokio::io::AsyncBufReadExt;
+    let gateway = Gateway::start(false).await;
+    let front = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let front_port = front.local_addr().unwrap().port();
+    let destination = gateway.address;
+    let (observed, received) = tokio::sync::oneshot::channel();
+    let forwarding = tokio::spawn(async move {
+        let (tcp, _) = front.accept().await.unwrap();
+        let mut tcp = tokio::io::BufReader::new(tcp);
+        let mut first = String::new();
+        tcp.read_line(&mut first).await.unwrap();
+        assert_eq!(first, format!("CONNECT {destination} HTTP/1.1\r\n"));
+        loop {
+            let mut line = String::new();
+            tcp.read_line(&mut line).await.unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut remote = TcpStream::connect(destination).await.unwrap();
+        tcp.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            .await
+            .unwrap();
+        observed.send(()).unwrap();
+        let _ = tokio::io::copy_bidirectional(&mut tcp, &mut remote).await;
+    });
+    let yaml = gateway.yaml("fixture-cookie")
+        .replace("    dtls-mode: off", "    dtls-mode: off\n    dialer-proxy: front")
+        .replace("rules:", &format!("  - name: front\n    type: http\n    server: 127.0.0.1\n    port: {front_port}\nrules:"));
+    let config = meow_config::load_config_from_str(&yaml).await.unwrap();
+    let proxy = config.proxies.get("vpn").unwrap();
+    let mut tcp = tokio::time::timeout(Duration::from_secs(3), proxy.dial_tcp(&metadata()))
+        .await
+        .unwrap()
+        .unwrap();
+    received.await.unwrap();
+    tcp.write_all(b"proxy chain").await.unwrap();
+    let mut result = [0; 11];
+    tcp.read_exact(&mut result).await.unwrap();
+    assert_eq!(&result, b"proxy chain");
+    drop(tcp);
+    drop(config);
+    tokio::time::timeout(Duration::from_secs(3), forwarding)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn configured_identity_reaches_authentication_and_cstp() {
+    let gateway = Gateway::start(false).await;
+    let mut requests = gateway.requests.subscribe();
+    let yaml = gateway.yaml("fixture-cookie").replace("    cookie: fixture-cookie", "    username: fixture-user\n    password: fixture-password\n    authgroup: Engineering\n    reported-os: android\n    user-agent: Fixture Agent\n    version: fixture-1\n    local-hostname: fixture-device\n    mobile: {platform-version: '15', device-type: phone, device-unique-id: fixture-id}\n    base-mtu: 1600\n    mtu: 1500\n    queue-length: 4");
+    let config = meow_config::load_config_from_str(&yaml).await.unwrap();
+    let proxy = config.proxies.get("vpn").unwrap();
+    let target = Metadata {
+        dst_ip: Some(peer::ADDRESS.into()),
+        dst_port: 8080,
+        ..Default::default()
+    };
+    let mut tcp = tokio::time::timeout(Duration::from_secs(3), proxy.dial_tcp(&target))
+        .await
+        .unwrap()
+        .unwrap();
+    tcp.write_all(b"identity").await.unwrap();
+    let mut answer = [0; 8];
+    tcp.read_exact(&mut answer).await.unwrap();
+    assert_eq!(&answer, b"identity");
+    for _ in 0..2 {
+        let (header, body) = requests.recv().await.unwrap();
+        assert!(header.contains("User-Agent: Fixture Agent\r\n"));
+        assert!(body.contains("<version who=\"vpn\">fixture-1</version>"));
+        assert!(body.contains("<device-id platform-version=\"15\" device-type=\"phone\" unique-id=\"fixture-id\">android</device-id>"));
+    }
+    let (header, _) = requests.recv().await.unwrap();
+    for expected in [
+        "X-CSTP-Hostname: fixture-device\r\n",
+        "X-CSTP-Base-MTU: 1600\r\n",
+        "X-CSTP-MTU: 1500\r\n",
+        "X-AnyConnect-Identifier-Platform: android\r\n",
+        "X-AnyConnect-Identifier-Device-UniqueID: fixture-id\r\n",
+    ] {
+        assert!(header.contains(expected), "missing {expected}");
+    }
+}
+
+#[tokio::test]
+async fn configured_trust_modes_accept_only_the_selected_peer() {
+    use base64::Engine;
+    let gateway = Gateway::start(false).await;
+    let pem = std::fs::read_to_string(gateway.ca.path()).unwrap();
+    let cert = boring::x509::X509::from_pem(pem.as_bytes()).unwrap();
+    let spki = cert.public_key().unwrap().public_key_to_der().unwrap();
+    let pin = base64::engine::general_purpose::STANDARD
+        .encode(boring::hash::hash(boring::hash::MessageDigest::sha256(), &spki).unwrap());
+    let yaml = gateway.yaml("fixture-cookie");
+    let ca_line = format!("    ca: '{}'", gateway.ca.path().display());
+    let target = Metadata {
+        dst_ip: Some(peer::ADDRESS.into()),
+        dst_port: 8080,
+        ..Default::default()
+    };
+    for (replacement, valid) in [
+        (
+            format!(
+                "    ca: |\n{}",
+                pem.lines()
+                    .map(|line| format!("      {line}\n"))
+                    .collect::<String>()
+            ),
+            true,
+        ),
+        (format!("    peer-fingerprint: pin-sha256:{pin}"), true),
+        (
+            format!("    peer-fingerprints: ['sha256:abcd', 'pin-sha256:{pin}']"),
+            true,
+        ),
+        ("    skip-cert-verify: true".into(), true),
+        ("    peer-fingerprint: sha256:abcd".into(), false),
+        ("    system-trust-disabled: true".into(), false),
+    ] {
+        let config = meow_config::load_config_from_str(&yaml.replace(&ca_line, &replacement))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            config.proxies["vpn"].dial_tcp(&target),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.is_ok(), valid);
+        if let Err(error) = result {
+            assert!(!error.to_string().contains("fixture-cookie"));
+        }
+    }
+}
+
 #[cfg(all(feature = "openconnect-dtls", unix))]
 #[tokio::test]
 async fn dtls_blackhole_keeps_auto_cstp_usable_during_handshake() {
@@ -140,6 +279,39 @@ async fn benchmark_real_ocserv_tls_dtls() {
 }
 
 async fn ocserv_roundtrip(mode: &str, fault: bool, measure: bool) {
+    ocserv_configured_roundtrip(mode, fault, measure, "off", false, "").await;
+}
+
+#[cfg(all(feature = "openconnect-dtls", unix))]
+#[tokio::test]
+#[ignore = "requires the local ocserv Docker image"]
+async fn independent_ocserv_compression_resumption_and_legacy_dtls() {
+    for compression in ["stateless", "all"] {
+        for mode in ["off", "require"] {
+            ocserv_configured_roundtrip(mode, false, false, compression, false, "").await;
+        }
+    }
+    ocserv_configured_roundtrip(
+        "require",
+        false,
+        false,
+        "off",
+        false,
+        "    dtls-key-exchange: resumption\n",
+    )
+    .await;
+    ocserv_configured_roundtrip("require", false, false, "stateless", true, "").await;
+}
+
+async fn ocserv_configured_roundtrip(
+    mode: &str,
+    fault: bool,
+    measure: bool,
+    compression: &str,
+    legacy: bool,
+    extra: &str,
+) {
+    eprintln!("ocserv mode={mode} compression={compression} legacy={legacy} extra={extra:?}");
     let _ = tracing_subscriber::fmt()
         .with_env_filter("meow_proxy=debug,meow_openconnect=debug")
         .try_init();
@@ -171,10 +343,13 @@ async fn ocserv_roundtrip(mode: &str, fault: bool, measure: bool) {
         let udp_env = format!("OCSERV_UDP_PORT={udp_port}");
         let dpd_env = if fault { "OCSERV_DPD=1" } else { "OCSERV_DPD=30" };
         let compatibility_env = if measure { "OCSERV_CISCO_COMPAT=false" } else { "OCSERV_CISCO_COMPAT=true" };
+        let compression_env = format!("OCSERV_COMPRESSION={}", compression != "off");
+        let legacy_env = format!("OCSERV_LEGACY_DTLS={legacy}");
         let output = tokio::process::Command::new("docker").args([
             "run", "--rm", "-d", "--cap-add", "NET_ADMIN", "--device", "/dev/net/tun",
             "--sysctl", "net.ipv6.conf.all.disable_ipv6=0", "-p", "127.0.0.1::443", "-v", &mount,
             "-p", &udp_mapping, "-e", &udp_env, "-e", dpd_env, "-e", compatibility_env,
+            "-e", &compression_env, "-e", &legacy_env,
             "meow-openconnect-ocserv:test",
         ]).output().await.unwrap();
         assert!(output.status.success(), "docker run failed: {}", String::from_utf8_lossy(&output.stderr));
@@ -192,7 +367,7 @@ async fn ocserv_roundtrip(mode: &str, fault: bool, measure: bool) {
             }
         }).await.expect("ocserv did not become ready");
         let yaml = format!("dns:\n  enable: false\nproxies:\n  - name: vpn\n    type: openconnect\n    server: 127.0.0.1\n    port: {}\n    server-name: vpn.test\n    ca: '{}'\n    username: fixture-user\n    password: fixture-password\n    authgroup: engineering\n    ipv6-disabled: false\n    remote-dns-resolve: true\n", address.port(), fixture.path().join("ca.pem").display());
-        let yaml = format!("{yaml}    dtls-mode: {mode}\n    mtu: 1400\n    compression: off\nrules:\n  - MATCH,vpn\n");
+        let yaml = format!("{yaml}    dtls-mode: {mode}\n    mtu: 1400\n    compression: {compression}\n    reconnect-timeout: 5\n{extra}rules:\n  - MATCH,vpn\n");
         #[cfg(all(feature = "openconnect-dtls", unix))]
         if measure {
             benchmark::run(&yaml, mode, &container.0).await;
@@ -210,6 +385,16 @@ async fn ocserv_roundtrip(mode: &str, fault: bool, measure: bool) {
             let mut tcp = result.unwrap();
             tcp.write_all(b"independent ocserv").await.unwrap();
             let mut received = [0; 18]; tcp.read_exact(&mut received).await.unwrap(); assert_eq!(&received, b"independent ocserv");
+            // Repeated payloads force compression and exercise state across packets.
+            if compression != "off" {
+                for value in [0x41, 0x41, 0x42] {
+                    let payload = vec![value; 32 * 1024];
+                    let (mut reader, mut writer) = tokio::io::split(&mut tcp);
+                    let mut received = vec![0; payload.len()];
+                    tokio::try_join!(writer.write_all(&payload), reader.read_exact(&mut received)).unwrap();
+                    assert_eq!(received, payload);
+                }
+            }
             target.dst_port = 5353;
             let destination = proxy.resolve_udp_destination(&target).await.unwrap().unwrap().address;
             assert_eq!(destination.is_ipv6(), host == "ipv6.vpn.test");
@@ -682,16 +867,20 @@ async fn transient_failures_have_bounded_retry_and_terminal_result_is_shared() {
     tokio::time::timeout(Duration::from_secs(25), async {
         let gateway = Gateway::start(false).await;
         gateway.status.send_replace(503);
-        let config = meow_config::load_config_from_str(&gateway.yaml("fixture-cookie"))
-            .await
-            .unwrap();
+        let config = meow_config::load_config_from_str(&gateway.yaml("fixture-cookie").replace(
+            "    dtls-mode: off",
+            "    dtls-mode: off\n    reconnect-timeout: 2",
+        ))
+        .await
+        .unwrap();
         let proxy = config.proxies.get("vpn").unwrap();
         let target = metadata();
         let (first, second) = tokio::join!(proxy.dial_tcp(&target), proxy.dial_tcp(&target));
         assert!(first.is_err() && second.is_err());
-        assert_eq!(*gateway.attempts.borrow(), 5);
+        let attempts = *gateway.attempts.borrow();
+        assert!((2..=4).contains(&attempts));
         assert!(proxy.dial_tcp(&metadata()).await.is_err());
-        assert_eq!(*gateway.attempts.borrow(), 5);
+        assert_eq!(*gateway.attempts.borrow(), attempts);
     })
     .await
     .unwrap();

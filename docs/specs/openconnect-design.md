@@ -5,9 +5,10 @@
 日期：2026-09-09
 
 阶段 0 已完成技术实验，见 [验证结果与 API 缺口](openconnect-phase-zero-results.md)。
-现代 DTLS 1.2 的 PSK 和注入恢复已验证；旧 Cisco 模式有已定位的参考网关互通失败，
-尚不列入已验证支持范围。当前接口、限制和复现命令见 [使用说明](../openconnect.md)。
-下文仍描述完整目标架构；MFA、split-DNS 等后续能力尚未实现。
+现代 DTLS 1.2 的 PSK/注入恢复及旧 Cisco DTLS 0.9 已验证。当前字段和默认值以
+[AnyConnect 配置对齐](openconnect-anyconnect-parity.md) 为准，包括客户端证书、MCA、
+软件令牌、压缩及代理链；F5 后续处理。当前接口、限制和复现命令见
+[使用说明](../openconnect.md)。下文保留各阶段设计和历史范围，split-DNS、浏览器交互仍待实现。
 
 ## 1. 设计决策
 

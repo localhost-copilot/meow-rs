@@ -95,7 +95,7 @@ impl Stack {
             || address6.is_some_and(|ip| {
                 ip.is_unspecified() || ip.is_multicast() || ip.to_ipv4_mapped().is_some()
             })
-            || !(576..=1500).contains(&mtu)
+            || mtu < 576
             || address6.is_some() && mtu < 1280
         {
             return Err(invalid("invalid userspace IP addresses or MTU"));

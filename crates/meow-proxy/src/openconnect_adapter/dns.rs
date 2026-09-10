@@ -13,13 +13,15 @@ use tokio::time::Instant;
 
 /// The cache and upstream list belong to one VPN generation. Neither survives reconnect.
 pub(super) struct Resolver {
+    ip_version: super::IpVersion,
     servers: Vec<SocketAddr>,
     cache: Mutex<HashMap<String, (IpAddr, Instant)>>,
 }
 
 impl Resolver {
-    pub fn new(servers: Vec<SocketAddr>) -> Self {
+    pub fn new(servers: Vec<SocketAddr>, ip_version: super::IpVersion) -> Self {
         Self {
+            ip_version,
             servers,
             cache: Mutex::new(HashMap::new()),
         }
@@ -69,10 +71,15 @@ impl Resolver {
             .iter()
             .filter(|server| stack.supports(server.ip()))
         {
-            for (kind, enabled) in [
-                (RecordType::A, stack.supports("0.0.0.0".parse().unwrap())),
-                (RecordType::AAAA, stack.supports("::".parse().unwrap())),
-            ] {
+            let mut kinds = [
+                (RecordType::A, "0.0.0.0".parse().unwrap()),
+                (RecordType::AAAA, "::".parse().unwrap()),
+            ];
+            if self.ip_version.prefer_ipv6() {
+                kinds.reverse();
+            }
+            for (kind, ip) in kinds {
+                let enabled = stack.supports(ip) && self.ip_version.accepts(ip);
                 if !enabled {
                     continue;
                 }
@@ -104,7 +111,10 @@ impl Resolver {
                     continue;
                 }
                 let (ips, ttl) = relevant_ip_answers(&message);
-                if let Some(ip) = ips.into_iter().find(|ip| stack.supports(*ip)) {
+                if let Some(ip) = ips
+                    .into_iter()
+                    .find(|ip| stack.supports(*ip) && self.ip_version.accepts(*ip))
+                {
                     return Ok((ip, ttl.unwrap_or(0)));
                 }
                 last_error = io::Error::new(

@@ -77,6 +77,8 @@ async fn run_data(
     let rekey = Instant::now() + parameters.rekey.unwrap_or(Duration::from_secs(86400 * 365));
     let mut data = Vec::with_capacity(usize::from(network.mtu) + 1);
     let mut pending = None;
+    let mut encoder = crate::compression::Encoder::new(parameters.compression);
+    let mut decoder = crate::compression::Decoder::new(parameters.compression);
     loop {
         enum Event {
             Out(Option<Vec<u8>>),
@@ -110,8 +112,13 @@ async fn run_data(
                 network.validate_packet(&packet)?;
                 if let Some(active) = &mut channel {
                     data.clear();
-                    data.push(0);
-                    data.extend_from_slice(&packet);
+                    if let Some(compressed) = encoder.encode(&packet)? {
+                        data.push(8);
+                        data.extend_from_slice(&compressed);
+                    } else {
+                        data.push(0);
+                        data.extend_from_slice(&packet);
+                    }
                     failure = send(active, &data).await.err();
                     // An attempted send is never replayed through TLS: its
                     // delivery may already have succeeded at the gateway.
@@ -141,6 +148,11 @@ async fn run_data(
                         // here can block outbound ACKs needed to drain the stack.
                         pending = deliver_or_defer(&incoming, packet)?;
                     }
+                    Some(8) => {
+                        let packet = decoder.decode(&packet[1..], network.mtu)?;
+                        network.validate_packet(&packet)?;
+                        pending = deliver_or_defer(&incoming, packet)?;
+                    }
                     Some(3) => failure = send(channel.as_mut().expect("active"), &[4]).await.err(),
                     Some(4 | 7) => {}
                     _ => {
@@ -167,13 +179,37 @@ async fn run_data(
             Event::Retry => {
                 let parameters = parameters.clone();
                 handshake = Some(Box::pin(async move {
-                    Channel::connect(
-                        (peer, parameters.port).into(),
-                        parameters.key,
-                        parameters.mtu,
-                        HANDSHAKE,
-                    )
-                    .await
+                    let connect = async {
+                        if let Some(connector) = parameters.connector {
+                            let socket = connector
+                                .connect((peer, parameters.port).into(), parameters.local_port)
+                                .await?;
+                            Channel::connect_socket(
+                                socket,
+                                parameters.key,
+                                parameters.mtu,
+                                HANDSHAKE,
+                            )
+                            .await
+                        } else {
+                            Channel::connect_bound(
+                                (peer, parameters.port).into(),
+                                parameters.key,
+                                parameters.mtu,
+                                HANDSHAKE,
+                                parameters.local_port,
+                            )
+                            .await
+                        }
+                    };
+                    tokio::time::timeout(HANDSHAKE, connect)
+                        .await
+                        .map_err(|_| {
+                            io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "DTLS dial or handshake timed out",
+                            )
+                        })?
                 }));
             }
             Event::Ready(result) => {
@@ -258,6 +294,9 @@ mod tests {
             // loop's TLS fallback path using fully controlled packet channels.
             let parameters = Parameters {
                 port: 0,
+                local_port: 0,
+                compression: crate::compression::Encoding::Identity,
+                connector: None,
                 mtu: 1400,
                 dpd: Duration::from_secs(30),
                 keepalive: Duration::from_secs(30),

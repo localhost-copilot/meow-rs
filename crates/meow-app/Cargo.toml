@@ -115,6 +115,7 @@ windows-service = "0.8.1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
 
 [dev-dependencies]
+boring = { workspace = true }
 serde_json = { workspace = true }
 meow-openconnect = { workspace = true }
 meow-transport = { workspace = true, default-features = false, features = ["tls"] }

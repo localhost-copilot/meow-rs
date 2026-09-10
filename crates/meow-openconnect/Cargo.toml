@@ -9,12 +9,27 @@ homepage.workspace = true
 description = "AnyConnect authentication and CSTP packet transport for meow-rs."
 
 [features]
-dtls = ["dep:libloading", "dep:libc", "dep:zeroize", "dep:tracing", "dep:openssl-src"]
+dtls = ["dep:libloading", "dep:libc", "dep:zeroize", "dep:tracing", "dep:openssl-src", "dep:async-trait"]
 
 [dependencies]
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 roxmltree = "0.21.1"
+serde = { workspace = true }
+url = "2"
+lz4_flex = { version = "0.13", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+sha1 = "0.10"
+data-encoding = "2"
+base64 = { workspace = true }
+hostname = "0.4"
+aes = { workspace = true }
+time = { workspace = true }
+pbkdf2 = "0.12"
+subtle = "2"
+async-trait = { workspace = true, optional = true }
 libloading = { version = "=0.8.9", optional = true }
 libc = { version = "0.2", optional = true }
 zeroize = { version = "1", optional = true }
