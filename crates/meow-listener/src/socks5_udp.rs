@@ -41,10 +41,19 @@ const NAT_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Per-destination outbound session within one association.
 struct Session {
-    conn: Arc<dyn ProxyPacketConn>,
+    packets: tokio::sync::mpsc::Sender<Vec<u8>>,
     last_activity_ms: Arc<AtomicU>,
     /// Reply task (server→client); aborted when the session is dropped.
     reply_task: tokio::task::AbortHandle,
+}
+
+type Destination = (Option<IpAddr>, smol_str::SmolStr, u16);
+
+struct Outbound(Box<dyn ProxyPacketConn>);
+impl Drop for Outbound {
+    fn drop(&mut self) {
+        let _ = self.0.close();
+    }
 }
 
 impl Drop for Session {
@@ -76,7 +85,7 @@ pub async fn handle_udp_associate(
     write_associate_reply(&mut control, bnd).await?;
     debug!("SOCKS5 UDP ASSOCIATE from {src_addr}: relay bound on {bnd}");
 
-    let mut nat: HashMap<SocketAddr, Session> = HashMap::new();
+    let mut nat: HashMap<Destination, Session> = HashMap::new();
     let mut buf = vec![0u8; 65535];
     let mut ctrl_buf = [0u8; 16];
     let requested_ip = requested_ip.filter(|ip| !ip.is_unspecified());
@@ -122,7 +131,7 @@ pub async fn handle_udp_associate(
                     Some(_) => {}
                 }
                 if let Err(e) =
-                    handle_client_datagram(tunnel, &relay, &mut nat, &buf[..n], client, inbound).await
+                    handle_client_datagram(tunnel, &relay, &mut nat, &buf[..n], client, inbound)
                 {
                     debug!("SOCKS5 UDP datagram from {client}: {e}");
                 }
@@ -137,7 +146,7 @@ pub async fn handle_udp_associate(
                         reason = "identity on 64-bit; u32→u64 widening on mips32"
                     )]
                     let elapsed = u64::from(now.wrapping_sub(last));
-                    elapsed < idle_ms
+                    elapsed < idle_ms && !session.reply_task.is_finished()
                 });
             }
         }
@@ -152,17 +161,17 @@ pub async fn handle_udp_associate(
 
 /// Parse one inbound datagram, route it, and forward it through the (possibly
 /// newly-created) per-destination outbound session.
-async fn handle_client_datagram(
+fn handle_client_datagram(
     tunnel: &Tunnel,
     relay: &Arc<UdpSocket>,
-    nat: &mut HashMap<SocketAddr, Session>,
+    nat: &mut HashMap<Destination, Session>,
     datagram: &[u8],
     client: SocketAddr,
     inbound: &Metadata,
 ) -> Result<(), String> {
     let (dst_ip, host, dst_port, data_off) = parse_udp_request(datagram)?;
 
-    let mut metadata = Metadata {
+    let metadata = Metadata {
         network: Network::Udp,
         conn_type: ConnType::Socks5,
         src_ip: Some(client.ip()),
@@ -176,42 +185,76 @@ async fn handle_client_datagram(
         ..Default::default()
     };
 
+    // Key by the client's original destination: sniffing/DNS may change the
+    // outbound IP, but later QUIC short-header packets carry no hostname.
+    let key = (metadata.dst_ip, metadata.host.clone(), metadata.dst_port);
+    if nat
+        .get(&key)
+        .is_some_and(|session| session.reply_task.is_finished())
+    {
+        nat.remove(&key);
+    }
+    if let Some(session) = nat.get(&key) {
+        let _ = session.packets.try_send(datagram[data_off..].to_vec());
+        return Ok(());
+    }
+    if nat.len() >= 1024 {
+        return Err("too many UDP destinations in this association".into());
+    }
+    let (packets, receiver) = tokio::sync::mpsc::channel(64);
+    packets
+        .try_send(datagram[data_off..].to_vec())
+        .expect("new queue has capacity");
+    let last_activity_ms = Arc::new(AtomicU::new(monotonic_ms() as meow_common::atomic::Uint));
+    let reply_task = {
+        let tunnel = tunnel.clone();
+        let relay = Arc::clone(relay);
+        let activity = Arc::clone(&last_activity_ms);
+        tokio::spawn(async move {
+            if let Err(error) =
+                relay_destination(&tunnel, &relay, receiver, client, metadata, &activity).await
+            {
+                debug!("SOCKS5 UDP flow: {error}");
+            }
+        })
+        .abort_handle()
+    };
+    nat.insert(
+        key,
+        Session {
+            packets,
+            last_activity_ms,
+            reply_task,
+        },
+    );
+    Ok(())
+}
+
+async fn relay_destination(
+    tunnel: &Tunnel,
+    relay: &UdpSocket,
+    mut receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    client: SocketAddr,
+    mut metadata: Metadata,
+    activity: &AtomicU,
+) -> Result<(), String> {
+    let original = metadata
+        .dst_ip
+        .map(|ip| SocketAddr::new(ip, metadata.dst_port));
     let inner = tunnel.inner();
     inner.pre_handle_metadata(&mut metadata);
+    let opening = inner.sniff_udp_initial(&mut metadata, &mut receiver).await;
+    if opening.is_empty() {
+        return Ok(());
+    }
     let resolved_route = inner
         .resolve_udp_host(&mut metadata)
         .await
-        .map_err(|error| error.to_string())?;
-
-    let Some(dst_ip) = metadata.dst_ip else {
-        return Err(format!(
-            "dst_ip not resolved for {}",
-            metadata.remote_address()
-        ));
-    };
-    let dst_addr = SocketAddr::new(dst_ip, metadata.dst_port);
-    let payload = &datagram[data_off..];
-
-    // Fast path: existing session for this destination.
-    if nat
-        .get(&dst_addr)
-        .is_some_and(|session| session.reply_task.is_finished())
-    {
-        nat.remove(&dst_addr);
-    }
-    if let Some(session) = nat.get(&dst_addr) {
-        let result = session.conn.write_packet(payload, &dst_addr).await;
-        if let Err(error) = result {
-            nat.remove(&dst_addr);
-            // Do not retry this datagram: the old transport may have sent it.
-            return Err(format!("udp write {dst_addr}: {error}"));
-        }
-        session.last_activity_ms.store(
-            monotonic_ms() as meow_common::atomic::Uint,
-            Ordering::Relaxed,
-        );
-        return Ok(());
-    }
+        .map_err(|e| e.to_string())?;
+    let dst_addr = SocketAddr::new(
+        metadata.dst_ip.ok_or("unresolved UDP destination")?,
+        metadata.dst_port,
+    );
 
     // Client UDP follows the configured routing policy, including port 53.
     let Some((proxy, _rule, _payload)) = resolved_route.or_else(|| inner.resolve_proxy(&metadata))
@@ -222,49 +265,45 @@ async fn handle_client_datagram(
         ));
     };
 
-    let conn: Arc<dyn ProxyPacketConn> = Arc::from(
+    let conn = Outbound(
         with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata))
             .await
             .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?,
     );
 
-    conn.write_packet(payload, &dst_addr)
-        .await
-        .map_err(|e| format!("udp initial write {dst_addr}: {e}"))?;
-
-    // Reply task: server→client. Wraps each datagram in the SOCKS5 UDP header
-    // and sends it back to the client's UDP source address.
-    let last_activity_ms = Arc::new(AtomicU::new(monotonic_ms() as meow_common::atomic::Uint));
-    let reply_task = {
-        let relay = Arc::clone(relay);
-        let conn = Arc::clone(&conn);
-        let last_activity_ms = Arc::clone(&last_activity_ms);
-        tokio::spawn(async move {
-            let mut rbuf = vec![0u8; 65535];
-            while let Ok((m, src)) = conn.read_packet(&mut rbuf).await {
+    for packet in opening {
+        conn.0
+            .write_packet(&packet, &dst_addr)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let mut rbuf = vec![0u8; 65535];
+    let idle = tokio::time::sleep(meow_tunnel::udp::DEFAULT_UDP_IDLE);
+    tokio::pin!(idle);
+    loop {
+        tokio::select! {
+            () = &mut idle => break,
+            packet = receiver.recv() => {
+                let Some(packet) = packet else { break; };
+                conn.0.write_packet(&packet, &dst_addr).await.map_err(|e| e.to_string())?;
+            }
+            result = conn.0.read_packet(&mut rbuf) => {
+                let (m, src) = result.map_err(|e| e.to_string())?;
                 let mut out: SmallVec<[u8; 1500]> = SmallVec::new();
-                encode_udp_header(&mut out, &src);
+                encode_udp_header(&mut out, &original.unwrap_or(src));
                 out.extend_from_slice(&rbuf[..m]);
                 if relay.send_to(&out, client).await.is_err() {
                     break;
                 }
-                last_activity_ms.store(
-                    monotonic_ms() as meow_common::atomic::Uint,
-                    Ordering::Relaxed,
-                );
             }
-        })
-        .abort_handle()
-    };
-
-    nat.insert(
-        dst_addr,
-        Session {
-            conn,
-            last_activity_ms,
-            reply_task,
-        },
-    );
+        }
+        activity.store(
+            monotonic_ms() as meow_common::atomic::Uint,
+            Ordering::Relaxed,
+        );
+        idle.as_mut()
+            .reset(tokio::time::Instant::now() + meow_tunnel::udp::DEFAULT_UDP_IDLE);
+    }
     Ok(())
 }
 
@@ -357,6 +396,46 @@ fn encode_udp_header(out: &mut SmallVec<[u8; 1500]>, addr: &SocketAddr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn quic_sni_routes_the_association_and_preserves_later_datagrams_and_reply_addresses() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let port = upstream.local_addr().unwrap().port();
+            let cfg = meow_config::load_config_from_str(&format!("hosts:\n  example.com: 127.0.0.1\nsniffer:\n  enable: true\n  sniff:\n    QUIC:\n      ports: [{port}]\n      override-destination: true\nrules:\n  - DOMAIN,example.com,DIRECT\n  - MATCH,REJECT\n")).await.unwrap();
+            let tunnel = Tunnel::new(cfg.dns.resolver);
+            tunnel.set_sniffer(cfg.sniffer);
+            tunnel.update_routing(cfg.proxies, cfg.rules);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let mut control = TcpStream::connect(addr).await.unwrap();
+            let (server, peer) = listener.accept().await.unwrap();
+            let task = tokio::spawn(async move { crate::socks5::handle_socks5(&tunnel, server, peer, None, None, "socks", addr.port()).await; });
+            control.write_all(&[5, 1, 0]).await.unwrap();
+            let mut greeting = [0u8; 2]; control.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 0]);
+            control.write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+            let mut bound = [0u8; 10]; control.read_exact(&mut bound).await.unwrap();
+            let relay = SocketAddr::from(([bound[4], bound[5], bound[6], bound[7]], u16::from_be_bytes([bound[8], bound[9]])));
+            let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let original = SocketAddr::from(([192, 0, 2, 1], port));
+            let hex: String = include_str!("../../meow-tunnel/tests/fixtures/quic/rfc9001-client-initial.hex").split_whitespace().collect();
+            let initial: Vec<u8> = hex.as_bytes().as_chunks::<2>().0.iter().map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()).collect();
+            for payload in [initial.as_slice(), b"\x40short-header-application-data"] {
+                let mut request = SmallVec::new(); encode_udp_header(&mut request, &original); request.extend_from_slice(payload);
+                client.send_to(&request, relay).await.unwrap();
+                let mut received = [0u8; 2048];
+                let (len, peer) = upstream.recv_from(&mut received).await.unwrap();
+                assert_eq!(&received[..len], payload);
+                upstream.send_to(b"reply", peer).await.unwrap();
+                let (len, _) = client.recv_from(&mut received).await.unwrap();
+                let (ip, _, reply_port, offset) = parse_udp_request(&received[..len]).unwrap();
+                assert_eq!(ip, Some(original.ip())); assert_eq!(reply_port, port);
+                assert_eq!(&received[offset..len], b"reply");
+            }
+            drop(control); task.await.unwrap();
+        }).await.expect("QUIC must choose the SNI rule before forwarding the first packet");
+    }
 
     #[tokio::test]
     async fn udp_port_53_obeys_reject_rule() {

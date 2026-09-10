@@ -17,8 +17,14 @@ pub fn sniff_tls(buf: &[u8]) -> Option<SmolStr> {
     let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
     let record = buf.get(5..5 + record_len)?;
 
+    sniff_client_hello(record)
+}
+
+/// Extract SNI from a TLS handshake message without its record envelope,
+/// as carried in QUIC CRYPTO frames.
+pub fn sniff_client_hello(record: &[u8]) -> Option<SmolStr> {
     // Handshake header: type(1) + length(3)
-    if record.is_empty() || record[0] != 0x01 {
+    if record.len() < 4 || record[0] != 0x01 {
         return None;
     }
     let handshake_len =
@@ -194,6 +200,15 @@ mod tests {
         // Only the 5-byte TLS record header, no handshake body — must not panic.
         let header = [0x16u8, 0x03, 0x01, 0x00, 0x05];
         assert_eq!(sniff_tls(&header), None);
+    }
+
+    #[test]
+    fn sniff_tls_rejects_incomplete_handshake_headers() {
+        for len in 0..4 {
+            let mut record = vec![0x16, 0x03, 0x03, 0, len];
+            record.extend_from_slice(&[0x01, 0, 0][..usize::from(len)]);
+            assert_eq!(sniff_tls(&record), None);
+        }
     }
 
     /// Build a ClientHello whose only extension is a non-SNI extension

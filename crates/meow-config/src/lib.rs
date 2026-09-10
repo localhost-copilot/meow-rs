@@ -837,6 +837,7 @@ fn rebuild_from_raw_impl(
     prefetched_payloads: Option<&rule_provider::PrefetchedPayloads>,
 ) -> Result<RebuildResult, anyhow::Error> {
     let ipv6 = effective_ipv6(raw.ipv6);
+    parse_sniffer_config(raw)?;
     let mut proxies: HashMap<SmolStr, Arc<dyn Proxy>> = HashMap::new();
     // Built-in proxies
     let mut direct = meow_proxy::DirectAdapter::new();
@@ -1188,7 +1189,7 @@ async fn load_rule_providers_async(
     .map_err(|e| anyhow::anyhow!("rule-provider load task failed: {e}"))
 }
 
-fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::Error> {
+pub fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::Error> {
     // Deprecated alias: tproxy_sni (pre-spec) synthesises a minimal config.
     let has_tproxy_sni = raw.tproxy_sni.unwrap_or(false);
 
@@ -1209,8 +1210,10 @@ fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::E
             // Parse per-protocol port lists.
             let mut tls_ports: Vec<u16> = Vec::new();
             let mut http_ports: Vec<u16> = Vec::new();
+            let mut quic_ports: Vec<u16> = Vec::new();
             let mut tls_override_destination = None;
             let mut http_override_destination = None;
+            let mut quic_override_destination = None;
             if let Some(sniff_map) = rs.sniff.as_ref() {
                 for (key, proto) in sniff_map {
                     match key.to_uppercase().as_str() {
@@ -1223,17 +1226,19 @@ fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::E
                             http_override_destination = proto.override_destination;
                         }
                         "QUIC" => {
-                            warn!("sniffer.sniff.QUIC is not implemented in meow-rs; ignoring");
+                            quic_ports = proto.ports.clone().unwrap_or_default();
+                            quic_override_destination = proto.override_destination;
                         }
                         other => {
                             warn!("sniffer.sniff.{}: unknown protocol, ignoring", other);
                         }
                     }
                 }
-                if enable && tls_ports.is_empty() && http_ports.is_empty() {
+                if enable && tls_ports.is_empty() && http_ports.is_empty() && quic_ports.is_empty()
+                {
                     anyhow::bail!(
                         "sniffer.sniff is present and enable: true, but no ports are configured \
-                        for any supported protocol (TLS/HTTP)"
+                        for any supported protocol (TLS/HTTP/QUIC)"
                     );
                 }
             } else if enable {
@@ -1247,9 +1252,11 @@ fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::E
                 override_destination: rs.override_destination.unwrap_or(true),
                 tls_override_destination,
                 http_override_destination,
+                quic_override_destination,
                 force_dns_mapping: rs.force_dns_mapping.unwrap_or(true),
                 tls_ports,
                 http_ports,
+                quic_ports,
                 skip_domain: rs
                     .skip_domain
                     .iter()

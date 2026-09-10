@@ -63,6 +63,7 @@ impl RouteTable {
 }
 
 pub struct TunnelInner {
+    udp_sniffer: RwLock<Arc<crate::sniffer::UdpSniffer>>,
     process_mode: RwLock<meow_common::process_lookup::FindProcessMode>,
     pub mode: RwLock<TunnelMode>,
     /// Current route table (rules + domain index + proxies), replaced
@@ -94,6 +95,14 @@ pub struct TunnelInner {
 }
 
 impl TunnelInner {
+    pub async fn sniff_udp_initial(
+        &self,
+        metadata: &mut Metadata,
+        packets: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+    ) -> Vec<Vec<u8>> {
+        let sniffer = Arc::clone(&self.udp_sniffer.read());
+        sniffer.collect(metadata, packets).await
+    }
     /// Snapshot the current route table: one short read lock + `Arc` clone.
     /// The returned `Arc` is safe to hold across `.await` points.
     pub fn route(&self) -> Arc<RouteTable> {
@@ -372,6 +381,9 @@ impl Tunnel {
         let direct = Arc::new(DirectAdapter::new().with_resolver(Arc::clone(&resolver)));
         Self {
             inner: Arc::new(TunnelInner {
+                udp_sniffer: RwLock::new(Arc::new(crate::sniffer::UdpSniffer::new(
+                    Default::default(),
+                ))),
                 process_mode: RwLock::new(Default::default()),
                 mode: RwLock::new(TunnelMode::Rule),
                 route: RwLock::new(Arc::new(RouteTable::empty())),
@@ -398,6 +410,10 @@ impl Tunnel {
 
     pub fn set_find_process_mode(&self, mode: meow_common::process_lookup::FindProcessMode) {
         *self.inner.process_mode.write() = mode;
+    }
+
+    pub fn set_sniffer(&self, config: meow_common::sniffer::SnifferConfig) {
+        *self.inner.udp_sniffer.write() = Arc::new(crate::sniffer::UdpSniffer::new(config));
     }
 
     pub fn mode(&self) -> TunnelMode {
