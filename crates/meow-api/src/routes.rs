@@ -1672,38 +1672,51 @@ async fn get_group_delay(
 
     // Resolve each member name to an `Arc<dyn Proxy>` *before* dropping the
     // proxies map so the spawned tasks hold their own Arc clones.
-    let members: Vec<(String, Arc<dyn meow_common::Proxy>)> = member_names
+    let members = member_names
         .into_iter()
-        .filter_map(|n| route.proxies.get(n.as_str()).cloned().map(|p| (n, p)))
+        .filter_map(|n| route.proxies.get(n.as_str()).cloned().map(|p| (n, p)));
+
+    // GroupBase.URLTest keeps successful results when another member fails or
+    // reaches the shared deadline. Queued probes cannot extend that deadline.
+    use futures::StreamExt as _;
+    let deadline = tokio::time::Instant::now() + timeout;
+    let probes: Vec<_> = members
+        .map(|(name, proxy): (String, Arc<dyn meow_common::Proxy>)| {
+            let url = &url;
+            let expected = expected.as_deref();
+            async move {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if !remaining.is_zero() {
+                    match tokio::time::timeout_at(
+                        deadline,
+                        probe_and_record(&proxy, url, expected, remaining),
+                    )
+                    .await
+                    {
+                        Ok(Ok(delay)) => return Some((name, delay)),
+                        Ok(Err(_)) => return None,
+                        Err(_) => {}
+                    }
+                }
+                proxy.health().record_delay(0);
+                None
+            }
+        })
         .collect();
     drop(route);
-
-    // upstream: group probe wraps the whole batch in one context.WithTimeout,
-    // not per-member. A slow member does not get its own budget.
-    let collected = tokio::time::timeout(
-        timeout,
-        meow_proxy::health::probe_many_bounded_detailed(
-            members,
-            &url,
-            expected.as_deref(),
-            timeout,
-            meow_proxy::health::GROUP_DELAY_CONCURRENCY,
-        ),
-    )
-    .await;
-
-    let Ok(pairs) = collected else {
-        // upstream: 504 "Timeout". Even if some members completed before the
-        // deadline, upstream still returns the timeout error — we match.
-        return msg_err(StatusCode::GATEWAY_TIMEOUT, "Timeout");
-    };
-
+    let mut probes =
+        futures::stream::iter(probes).buffer_unordered(meow_proxy::health::GROUP_DELAY_CONCURRENCY);
     let mut result: BTreeMap<String, u16> = BTreeMap::new();
-    for pair in pairs {
-        if matches!(pair.error, Some(meow_proxy::health::UrlTestError::Timeout)) {
-            return msg_err(StatusCode::GATEWAY_TIMEOUT, "Timeout");
+    while let Some(pair) = probes.next().await {
+        if let Some((name, delay)) = pair {
+            result.insert(name, delay);
         }
-        result.insert(pair.name, pair.delay);
+    }
+    if result.is_empty() {
+        return msg_err(
+            StatusCode::GATEWAY_TIMEOUT,
+            "get delay: all proxies timeout",
+        );
     }
     Json(result).into_response()
 }

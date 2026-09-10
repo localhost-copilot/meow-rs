@@ -2157,7 +2157,7 @@ async fn d2_d3_group_delay_404_table() {
 
 #[tokio::test]
 async fn d4_group_delay_timeout_hits_504() {
-    // Every member sleeps past the group-wide deadline → 504 Timeout.
+    // No successful member remains at the shared deadline.
     let a = TestAdapter::new(
         "A",
         DialBehavior::SleepThenOk(std::time::Duration::from_millis(500)),
@@ -2174,7 +2174,50 @@ async fn d4_group_delay_timeout_hits_504() {
     let resp = delay_req(app, format!("/group/G/delay?url={}&timeout=50", url_q())).await;
     assert_eq!(resp.status(), StatusCode::GATEWAY_TIMEOUT);
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(&bytes[..], br#"{"message":"Timeout"}"#);
+    assert_eq!(
+        &bytes[..],
+        br#"{"message":"get delay: all proxies timeout"}"#
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn group_delay_keeps_successes_when_other_members_time_out() {
+    let good = TestAdapter::new("good", DialBehavior::InstantOk).into_proxy();
+    let slow = TestAdapter::new(
+        "slow",
+        DialBehavior::SleepThenOk(std::time::Duration::from_secs(1)),
+    )
+    .into_proxy();
+    let failed = TestAdapter::new(
+        "failed",
+        DialBehavior::SleepThenError(std::time::Duration::from_millis(1)),
+    )
+    .into_proxy();
+    let group = fallback_group(
+        "G",
+        vec![Arc::clone(&good), Arc::clone(&slow), Arc::clone(&failed)],
+    );
+    let state = state_with_proxies(vec![
+        ("good", good),
+        ("slow", Arc::clone(&slow)),
+        ("failed", Arc::clone(&failed)),
+        ("G", group),
+    ]);
+    let start = tokio::time::Instant::now();
+    let response = delay_req(
+        create_router(state),
+        format!("/group/G/delay?url={}&timeout=50", url_q()),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let result = body_json(response).await;
+    assert_eq!(result.as_object().unwrap().len(), 1);
+    assert!(result["good"].as_u64().unwrap() > 0);
+    assert_eq!(start.elapsed(), std::time::Duration::from_millis(50));
+    for proxy in [slow, failed] {
+        assert!(!proxy.health().alive());
+        assert_eq!(proxy.delay_history().len(), 1);
+    }
 }
 
 #[tokio::test]
@@ -2618,9 +2661,9 @@ async fn h_series_expected_status_table() {
 }
 
 #[tokio::test]
-async fn h5_group_member_outside_explicit_status_range_is_zero() {
-    // An explicitly restricted status range records a rejected member as
-    // zero without turning the whole group probe into an error.
+async fn h5_group_member_outside_explicit_status_range_is_omitted() {
+    // An explicitly restricted status range omits a rejected member without
+    // turning the whole group probe into an error.
     let good = TestAdapter::new("good", DialBehavior::InstantOk).into_proxy();
     let bad = TestAdapter::new("bad", DialBehavior::InstantStatus(500, "Oops")).into_proxy();
     let group = fallback_group("G", vec![Arc::clone(&good), Arc::clone(&bad)]);
@@ -2637,7 +2680,7 @@ async fn h5_group_member_outside_explicit_status_range_is_zero() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["bad"], 0);
+    assert!(body.get("bad").is_none());
     assert!(body["good"].as_u64().unwrap() >= 1);
 }
 
