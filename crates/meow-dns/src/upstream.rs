@@ -67,14 +67,8 @@ impl fmt::Display for NameServerUrl {
     }
 }
 
-/// A nameserver entry — a [`NameServerUrl`] plus an optional `#PROXY` tag
-/// telling the resolver to tunnel queries through the named proxy.
-///
-/// See [ADR-0012](../../../../docs/adr/0012-dns-via-proxy.md) for the
-/// design (issue #67 phase 2). Only the plain `Udp` / `Tcp` URL forms
-/// accept a `#PROXY` fragment in this slice; `Tls` / `Https` already use
-/// `#` for SNI and need the `?proxy=NAME` query-string disambiguator
-/// from the ADR, which is left for a follow-up.
+/// A nameserver URL and its optional mihomo `#PROXY` route. TLS names
+/// default to the URL host; an explicit `&sni=NAME` overrides only TLS SNI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameServerEntry {
     pub url: NameServerUrl,
@@ -86,35 +80,27 @@ impl NameServerEntry {
         Self { url, proxy: None }
     }
 
-    /// Parse a nameserver string, returning the parsed `NameServerUrl` plus
-    /// the optional proxy name if a `#PROXY` fragment was present on a
-    /// plain (Udp/Tcp) entry.
     pub fn parse(s: &str) -> Result<Self, NameServerParseError> {
         let s = s.trim();
-        if s.is_empty() {
-            return Err(NameServerParseError::EmptyInput);
+        let (head, fragment) = s.split_once('#').unwrap_or((s, ""));
+        let mut url = NameServerUrl::parse(head)?;
+        let mut proxy = None;
+        if head != s && fragment.is_empty() {
+            return Err(NameServerParseError::InvalidHost(s.to_string()));
         }
-
-        // Only plain forms (no scheme, `udp://`, `tcp://`) treat the `#`
-        // fragment as a proxy name. For `tls://` / `https://` the
-        // fragment is SNI — leave it intact and let NameServerUrl::parse
-        // consume it normally.
-        let is_plain_form = !(s.starts_with("tls://") || s.starts_with("https://"));
-        if is_plain_form {
-            if let Some(idx) = s.find('#') {
-                let head = &s[..idx];
-                let proxy = s[idx + 1..].trim();
-                if proxy.is_empty() {
-                    return Err(NameServerParseError::InvalidHost(s.to_string()));
-                }
-                let url = NameServerUrl::parse(head)?;
-                return Ok(Self {
-                    url,
-                    proxy: Some(proxy.to_string()),
-                });
+        for param in fragment.split('&').filter(|s| !s.is_empty()) {
+            match param.split_once('=') {
+                Some(("sni", value)) => match &mut url {
+                    NameServerUrl::Tls { sni, .. } | NameServerUrl::Https { sni, .. } => {
+                        *sni = value.to_string();
+                    }
+                    _ => return Err(NameServerParseError::InvalidHost(s.to_string())),
+                },
+                Some(_) => return Err(NameServerParseError::InvalidHost(s.to_string())),
+                None => proxy = Some(param.trim().to_string()),
             }
         }
-        Ok(Self::plain(NameServerUrl::parse(s)?))
+        Ok(Self { url, proxy })
     }
 }
 
@@ -774,14 +760,14 @@ mod tests {
 
     #[test]
     #[cfg(feature = "encrypted")]
-    fn entry_tls_fragment_is_sni_not_proxy() {
-        // For tls:// the `#` is SNI per the existing parser; the
-        // NameServerEntry layer must NOT steal that fragment as a proxy
-        // name. ADR-0012 reserves `?proxy=NAME` for TLS/HTTPS — not yet
-        // implemented, but the existing SNI semantics must keep working.
-        let e = NameServerEntry::parse("tls://1.1.1.1:853#dns.google").unwrap();
-        assert!(e.proxy.is_none());
-        assert!(matches!(e.url, NameServerUrl::Tls { .. }));
+    fn encrypted_entry_keeps_proxy_name_out_of_tls_sni() {
+        let e = NameServerEntry::parse("tls://1.1.1.1:853#🧭 DNS 出口").unwrap();
+        assert_eq!(e.proxy.as_deref(), Some("🧭 DNS 出口"));
+        assert!(matches!(e.url, NameServerUrl::Tls { sni, .. } if sni == "1.1.1.1"));
+        let e =
+            NameServerEntry::parse("https://1.1.1.1/dns-query#DNS&sni=cloudflare-dns.com").unwrap();
+        assert_eq!(e.proxy.as_deref(), Some("DNS"));
+        assert!(matches!(e.url, NameServerUrl::Https { sni, .. } if sni == "cloudflare-dns.com"));
     }
 
     #[test]

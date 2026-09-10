@@ -1440,16 +1440,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_resolver_tls_fragment_stays_sni() {
-        // For tls:// the fragment is SNI, not a proxy name — must keep
-        // parsing as before and never consult the registry.
-        let registry: HashMap<smol_str::SmolStr, Arc<dyn meow_common::Proxy>> = HashMap::new();
-        let value = crate::raw::RawNspValue::One("tls://8.8.4.4#dns.google".to_string());
+    async fn policy_resolver_encrypted_fragment_selects_proxy() {
+        let registry = stub_registry(&[("DNS", "127.0.0.1:443")]);
+        let value = crate::raw::RawNspValue::One("tls://8.8.4.4#DNS".to_string());
         let resolvers = build_policy_resolvers("example.com", &value, &[], &registry)
             .await
-            .expect("tls entry with SNI fragment builds");
+            .expect("TLS entry with a proxy fragment builds");
         assert_eq!(resolvers.len(), 1);
-        assert!(!resolvers[0].is_proxied());
+        assert!(resolvers[0].is_proxied());
     }
 
     // --- proxy-server-nameserver `#PROXY` circularity ---------------------

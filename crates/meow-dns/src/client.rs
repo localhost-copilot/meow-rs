@@ -554,7 +554,7 @@ impl DnsClient {
                 }
             }
             Ok(FamilyLookupResult::NxDomain(ttl)) => FamilyAnswer::NxDomain(ttl),
-            Err(_) => FamilyAnswer::Failed,
+            Err(error) => return Err(error),
         };
         let (v4, v6) = if family == QueryFamilies::IPV4 {
             (Some(answer), None)
@@ -714,33 +714,12 @@ impl DnsClient {
         wire: &[u8],
         expected: &ExpectedResponse,
     ) -> Result<Message, ClientError> {
-        if let Some(proxy) = self.proxy.as_ref() {
-            let addr = match &self.transport {
-                Transport::Udp { addr } | Transport::Tcp { addr } => *addr,
-                Transport::RCode { .. } => {
-                    return Err(ClientError::Protocol(
-                        "rcode transport should not perform network exchange",
-                    ));
-                }
-                #[cfg(feature = "encrypted")]
-                Transport::Dot { .. } | Transport::Doh { .. } => {
-                    // DoT/DoH-over-proxy needs TLS layered on a Box<dyn
-                    // ProxyConn>; the upstream tokio_rustls TlsConnector
-                    // is generic over the IO stream but the call sites
-                    // here aren't wired yet. ADR-0012 marks it
-                    // follow-up. Refuse so misconfiguration is loud.
-                    return Err(ClientError::Tls(
-                        "DoT/DoH routing through a proxy is not implemented yet \
-                        (issue #67 phase 2 follow-up); use plain udp:// or tcp:// for \
-                        a #PROXY-tagged nameserver"
-                            .to_string(),
-                    ));
-                }
-            };
-            let response = proxy_tcp_exchange(proxy, addr, wire).await?;
-            return decode_validated_response(&response, expected);
-        }
         match &self.transport {
+            Transport::Udp { addr } | Transport::Tcp { addr } if self.proxy.is_some() => {
+                let response =
+                    proxy_tcp_exchange(self.proxy.as_ref().unwrap(), *addr, wire).await?;
+                decode_validated_response(&response, expected)
+            }
             Transport::Udp { addr } => udp_exchange(*addr, wire, expected).await,
             Transport::Tcp { addr } => self.tcp_exchange_pooled(*addr, wire, expected).await,
             Transport::RCode { .. } => Err(ClientError::Protocol(
@@ -748,12 +727,12 @@ impl DnsClient {
             )),
             #[cfg(feature = "encrypted")]
             Transport::Dot { addr, sni } => {
-                let response = dot_exchange(*addr, sni, wire).await?;
+                let response = dot_exchange(*addr, sni, wire, self.proxy.as_ref()).await?;
                 decode_validated_response(&response, expected)
             }
             #[cfg(feature = "encrypted")]
             Transport::Doh { addr, sni, path } => {
-                let response = doh_exchange(*addr, sni, path, wire).await?;
+                let response = doh_exchange(*addr, sni, path, wire, self.proxy.as_ref()).await?;
                 decode_validated_response(&response, expected)
             }
         }
@@ -825,6 +804,15 @@ async fn proxy_tcp_exchange(
     addr: SocketAddr,
     wire: &[u8],
 ) -> Result<Vec<u8>, ClientError> {
+    let mut stream = proxy_tcp_connect(proxy, addr).await?;
+    write_lp(&mut stream, wire).await?;
+    read_lp(&mut stream).await
+}
+
+async fn proxy_tcp_connect(
+    proxy: &DnsProxy,
+    addr: SocketAddr,
+) -> Result<Box<dyn meow_common::ProxyConn>, ClientError> {
     use meow_common::{ConnType, Metadata, Network};
     let metadata = Metadata {
         network: Network::Tcp,
@@ -834,12 +822,10 @@ async fn proxy_tcp_exchange(
         dst_port: addr.port(),
         ..Default::default()
     };
-    let mut stream = proxy
+    proxy
         .dial_tcp(&metadata)
         .await
-        .map_err(|e| io::Error::other(format!("dns-via-proxy dial: {e}")))?;
-    write_lp(&mut stream, wire).await?;
-    read_lp(&mut stream).await
+        .map_err(|e| ClientError::Io(io::Error::other(format!("dns-via-proxy dial: {e}"))))
 }
 
 fn ip_from_record(rec: &Record) -> Option<IpAddr> {
@@ -1057,13 +1043,13 @@ async fn read_lp<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Vec<u8>, ClientEr
 }
 
 #[cfg(feature = "encrypted")]
-async fn dot_exchange(addr: SocketAddr, sni: &str, wire: &[u8]) -> Result<Vec<u8>, ClientError> {
-    let tls = tls_layer(sni, "dot")?;
-    let tcp = factory().connect_tcp(addr).await?;
-    let mut stream = tls
-        .connect(Box::new(tcp))
-        .await
-        .map_err(|e| ClientError::Tls(e.to_string()))?;
+async fn dot_exchange(
+    addr: SocketAddr,
+    sni: &str,
+    wire: &[u8],
+    proxy: Option<&DnsProxy>,
+) -> Result<Vec<u8>, ClientError> {
+    let mut stream = encrypted_connect(addr, sni, "dot", proxy).await?;
     write_lp(&mut stream, wire).await?;
     read_lp(&mut stream).await
 }
@@ -1112,13 +1098,9 @@ async fn doh_exchange(
     sni: &str,
     path: &str,
     wire: &[u8],
+    proxy: Option<&DnsProxy>,
 ) -> Result<Vec<u8>, ClientError> {
-    let tls = tls_layer(sni, "http/1.1")?;
-    let tcp = factory().connect_tcp(addr).await?;
-    let mut stream = tls
-        .connect(Box::new(tcp))
-        .await
-        .map_err(|e| ClientError::Tls(e.to_string()))?;
+    let mut stream = encrypted_connect(addr, sni, "http/1.1", proxy).await?;
 
     // Minimal HTTP/1.1 POST. Connection: close so the server EOFs and we can
     // read-to-end without parsing chunked transfer-encoding.
@@ -1161,6 +1143,25 @@ async fn doh_exchange(
         return Err(ClientError::Protocol("doh: non-200 status"));
     }
     Ok(body.to_vec())
+}
+
+#[cfg(feature = "encrypted")]
+async fn encrypted_connect(
+    addr: SocketAddr,
+    sni: &str,
+    alpn: &str,
+    proxy: Option<&DnsProxy>,
+) -> Result<Box<dyn meow_transport::Stream>, ClientError> {
+    let tls = tls_layer(sni, alpn)?;
+    let stream: Box<dyn meow_transport::Stream> = match proxy {
+        Some(proxy) => Box::new(proxy_tcp_connect(proxy, addr).await?),
+        None => Box::new(factory().connect_tcp(addr).await?),
+    };
+    // The dial uses the bootstrapped IP; TLS still authenticates the original
+    // nameserver name, independently of the selected proxy's own TLS layer.
+    tls.connect(stream)
+        .await
+        .map_err(|e| ClientError::Tls(e.to_string()))
 }
 
 #[cfg(feature = "encrypted")]

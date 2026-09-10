@@ -50,12 +50,6 @@ pub enum BootstrapError {
     },
     #[error("nameserver '{nameserver}' references proxy '{proxy}', which is not defined")]
     UnknownProxy { nameserver: String, proxy: String },
-    #[error(
-        "nameserver '{nameserver}' uses proxy '{proxy}' on a tls:///https:// entry; \
-        DoT/DoH routing through a proxy is not implemented yet — use plain udp:// or tcp:// \
-        (issue #67 phase 2 follow-up)"
-    )]
-    EncryptedProxyUnsupported { nameserver: String, proxy: String },
 }
 
 /// Broadcast channel used to share a singleflight lookup result.
@@ -727,15 +721,6 @@ impl Resolver {
             let Some(p) = entry.proxy.as_ref() else {
                 continue;
             };
-            if matches!(
-                entry.url,
-                NameServerUrl::Tls { .. } | NameServerUrl::Https { .. }
-            ) {
-                return Err(BootstrapError::EncryptedProxyUnsupported {
-                    nameserver: entry.url.to_string(),
-                    proxy: p.clone(),
-                });
-            }
             if !proxy_registry.contains_key(p.as_str()) {
                 return Err(BootstrapError::UnknownProxy {
                     nameserver: entry.url.to_string(),
