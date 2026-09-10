@@ -15,15 +15,17 @@ type ConstPtr = *const c_void;
 type PskCallback =
     unsafe extern "C" fn(Ptr, *const c_char, *mut c_char, c_uint, *mut u8, c_uint) -> c_uint;
 
-// Keep every lookup on one library handle. Linking openssl-sys would resolve
-// overlapping SSL/crypto symbols against the application's BoringSSL instead.
+// musl links a private, symbol-prefixed OpenSSL. Other supported platforms keep
+// every lookup on one isolated library handle; never link unprefixed openssl-sys.
 macro_rules! api {
     ($($field:ident: $symbol:literal ($($arg:ty),*) -> $ret:ty;)+) => {
         struct Api {
+            #[cfg(not(all(target_os = "linux", target_env = "musl")))]
             _library: libloading::Library,
             $($field: unsafe extern "C" fn($($arg),*) -> $ret,)+
         }
         impl Api {
+            #[cfg(not(all(target_os = "linux", target_env = "musl")))]
             unsafe fn from_library(library: libloading::Library) -> io::Result<Self> {
                 // SAFETY: callers load OpenSSL 3; these are its public C ABI
                 // signatures. The owned library outlives all function pointers.
@@ -33,6 +35,14 @@ macro_rules! api {
                     ).map_err(|_| unavailable("OpenSSL 3 DTLS API unavailable"))?;)+
                     Ok(Self { _library: library, $($field,)+ })
                 }
+            }
+            #[cfg(all(target_os = "linux", target_env = "musl"))]
+            fn linked() -> Self {
+                unsafe extern "C" {
+                    $(#[link_name = concat!("meow_oc_", $symbol)]
+                    fn $field($(_: $arg),*) -> $ret;)+
+                }
+                Self { $($field,)+ }
             }
         }
     }
@@ -94,6 +104,17 @@ pub(super) fn random_secret() -> io::Result<zeroize::Zeroizing<[u8; 48]>> {
     Ok(secret)
 }
 
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+fn load() -> io::Result<Api> {
+    let api = Api::linked();
+    // SAFETY: points to our statically linked, prefixed OpenSSL implementation.
+    if unsafe { (api.version)() } >> 28 != 3 {
+        return Err(unavailable("OpenConnect DTLS requires OpenSSL 3"));
+    }
+    Ok(api)
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "musl")))]
 fn load() -> io::Result<Api> {
     #[cfg(target_os = "macos")]
     let candidates = [
@@ -104,7 +125,7 @@ fn load() -> io::Result<Api> {
     #[cfg(not(target_os = "macos"))]
     let candidates = ["libssl.so.3"];
     // glibc deep binding and macOS two-level namespaces are the currently
-    // supported isolation mechanisms. Do not silently load on musl/BSD.
+    // supported dynamic isolation mechanisms. musl uses prefixed static linkage.
     if !cfg!(any(
         target_os = "macos",
         all(target_os = "linux", target_env = "gnu")

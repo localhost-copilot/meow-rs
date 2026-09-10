@@ -74,12 +74,15 @@ build_meow() {
              "$staging/data/usr/bin" \
              "$staging/data/etc/init.d" \
              "$staging/data/etc/config" \
-             "$staging/data/etc/meow"
+             "$staging/data/etc/meow" \
+             "$staging/data/usr/share/licenses/meow"
 
     install -m 755 "$binary" "$staging/data/usr/bin/meow"
     install -m 755 "$SCRIPT_DIR/meow/files/meow.init" "$staging/data/etc/init.d/meow"
     install -m 644 "$SCRIPT_DIR/meow/files/meow.config" "$staging/data/etc/config/meow"
     install -m 644 "$SCRIPT_DIR/meow/files/config.yaml" "$staging/data/etc/meow/config.yaml"
+    # musl builds with openconnect-dtls embed OpenSSL instead of using libssl.
+    install -m 644 "$SCRIPT_DIR/meow/files/OpenSSL.LICENSE" "$staging/data/usr/share/licenses/meow/OpenSSL.LICENSE"
 
     cat > "$staging/control/control" <<EOF
 Package: meow

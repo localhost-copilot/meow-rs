@@ -347,6 +347,17 @@ jobs:
       - name: meow-listener TUN tests (listener-tun)
         run: cargo test -p meow-listener --features listener-tun --lib -- --nocapture
 
+  openconnect-musl:
+    runs-on: ubuntu-24.04-arm
+    needs: lint
+    steps:
+      - uses: actions/checkout@v5
+      # Only local mock/OpenSSL tests. Real ocserv and OpenWrt tests stay opt-in.
+      - name: Static musl DTLS build and local interoperability tests
+        run: >-
+          docker build -f tests/openconnect/Dockerfile.musl
+          -t meow-openconnect-musl:test .
+
   tproxy:
     runs-on: ubuntu-latest
     needs: lint
