@@ -76,20 +76,28 @@ async fn run_data(
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let rekey = Instant::now() + parameters.rekey.unwrap_or(Duration::from_secs(86400 * 365));
     let mut data = Vec::with_capacity(usize::from(network.mtu) + 1);
+    let mut pending = None;
     loop {
         enum Event {
             Out(Option<Vec<u8>>),
             Tls(Option<Vec<u8>>),
             Dtls(io::Result<Vec<u8>>),
             Ready(io::Result<Channel>),
+            Delivered(io::Result<()>),
             Tick,
             Retry,
             Rekey,
         }
+        let can_receive = pending.is_none();
         let event = tokio::select! {
             packet = outgoing.recv(), if mode == DtlsMode::Auto || channel.is_some() => Event::Out(packet),
-            packet = tls_rx.recv() => Event::Tls(packet),
-            packet = async { channel.as_mut().expect("guarded").recv().await }, if channel.is_some() => Event::Dtls(packet),
+            packet = tls_rx.recv(), if can_receive || mode == DtlsMode::Require => Event::Tls(packet),
+            packet = async { channel.as_mut().expect("guarded").recv().await }, if channel.is_some() && can_receive => Event::Dtls(packet),
+            result = async {
+                let permit = incoming.reserve().await.map_err(|_| crate::closed())?;
+                permit.send(pending.take().expect("pending packet"));
+                Ok::<_, io::Error>(())
+            }, if !can_receive => Event::Delivered(result),
             result = async { handshake.as_mut().expect("guarded").await }, if handshake.is_some() => Event::Ready(result),
             _ = tick.tick() => Event::Tick,
             _ = tokio::time::sleep_until(retry), if channel.is_none() && handshake.is_none() => Event::Retry,
@@ -97,6 +105,7 @@ async fn run_data(
         };
         let mut failure = None;
         match event {
+            Event::Delivered(result) => result?,
             Event::Out(Some(packet)) => {
                 network.validate_packet(&packet)?;
                 if let Some(active) = &mut channel {
@@ -119,7 +128,7 @@ async fn run_data(
                 if mode == DtlsMode::Require {
                     continue;
                 }
-                incoming.send(packet).await.map_err(|_| crate::closed())?;
+                pending = deliver_or_defer(&incoming, packet)?;
             }
             Event::Out(None) | Event::Tls(None) => return Err(crate::closed()),
             Event::Dtls(Ok(mut packet)) => {
@@ -128,7 +137,9 @@ async fn run_data(
                     Some(0) => {
                         network.validate_packet(&packet[1..])?;
                         packet.remove(0);
-                        incoming.send(packet).await.map_err(|_| crate::closed())?;
+                        // Keep at most one undelivered IP packet. Waiting inline
+                        // here can block outbound ACKs needed to drain the stack.
+                        pending = deliver_or_defer(&incoming, packet)?;
                     }
                     Some(3) => failure = send(channel.as_mut().expect("active"), &[4]).await.err(),
                     Some(4 | 7) => {}
@@ -202,6 +213,17 @@ async fn run_data(
     }
 }
 
+fn deliver_or_defer(
+    incoming: &mpsc::Sender<Vec<u8>>,
+    packet: Vec<u8>,
+) -> io::Result<Option<Vec<u8>>> {
+    match incoming.try_send(packet) {
+        Ok(()) => Ok(None),
+        Err(mpsc::error::TrySendError::Full(packet)) => Ok(Some(packet)),
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(crate::closed()),
+    }
+}
+
 async fn send(channel: &mut Channel, packet: &[u8]) -> io::Result<()> {
     tokio::time::timeout(Duration::from_secs(5), channel.send(packet))
         .await
@@ -212,4 +234,65 @@ fn unavailable() -> io::Error {
         io::ErrorKind::ConnectionAborted,
         "required DTLS data channel unavailable",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn inbound_backpressure_preserves_outbound_progress_and_packet_order() {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (outgoing, outgoing_rx) = mpsc::channel(1);
+            let (incoming, mut incoming_rx) = mpsc::channel(1);
+            let (tls_tx, mut tls_outgoing) = mpsc::channel(1);
+            let (tls_incoming, tls_rx) = mpsc::channel(1);
+            incoming.send(vec![1]).await.unwrap();
+            let network = NetworkConfig {
+                address: Some(std::net::Ipv4Addr::new(192, 0, 2, 2)),
+                address6: None,
+                dns: vec![],
+                mtu: 1400,
+            };
+            // Reject DTLS setup before loading a library: exercise the shared
+            // loop's TLS fallback path using fully controlled packet channels.
+            let parameters = Parameters {
+                port: 0,
+                mtu: 1400,
+                dpd: Duration::from_secs(30),
+                keepalive: Duration::from_secs(30),
+                rekey: None,
+                key: super::super::Key::Psk {
+                    secret: zeroize::Zeroizing::new([0; 32]),
+                    application_id: vec![1],
+                },
+            };
+            let task = tokio::spawn(run_data(
+                outgoing_rx,
+                incoming,
+                tls_tx,
+                tls_rx,
+                network,
+                DtlsMode::Auto,
+                std::net::Ipv4Addr::LOCALHOST.into(),
+                parameters,
+                None,
+            ));
+            tls_incoming.send(vec![2]).await.unwrap();
+            // Reserving the sole slot proves the loop consumed the packet and
+            // encountered the already-full delivery channel; no timing sleeps.
+            drop(tls_incoming.reserve().await.unwrap());
+            let mut packet = vec![0; 20];
+            packet[0] = 0x45;
+            packet[2..4].copy_from_slice(&20u16.to_be_bytes());
+            outgoing.send(packet.clone()).await.unwrap();
+            assert_eq!(tls_outgoing.recv().await.unwrap(), packet);
+            assert_eq!(incoming_rx.recv().await.unwrap(), vec![1]);
+            assert_eq!(incoming_rx.recv().await.unwrap(), vec![2]);
+            drop(outgoing);
+            assert!(task.await.unwrap().is_err());
+        })
+        .await
+        .unwrap();
+    }
 }
