@@ -90,6 +90,10 @@ defmt = ["dep:defmt", "heapless/defmt"]
 # In all these cases, `CongestionControl::Reno` is a better choice of congestion control algorithm.
 "socket-tcp-cubic" = []
 
+# Lower the measured TCP RTO floor to 200 ms. Initial RTO remains 1 second.
+# Opt-in policy for the OpenConnect stack; see README.md for validation limits.
+"tcp-min-rto-200ms" = ["socket-tcp"]
+
 # Enable Reno TCP congestion control algorithm, and it is used as a default congestion controller.
 "socket-tcp-reno" = []
 

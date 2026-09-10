@@ -20,3 +20,25 @@ uses workspace package metadata, removes unused example/test dependencies,
 and the library root adds an introductory rustdoc paragraph. Three equivalent
 style changes satisfy current Clippy: TCP keepalive initialization, DHCP DNS
 address chunk iteration, and IEEE 802.15.4 optional PAN ID matching.
+
+## TCP recovery changes
+
+- A negotiated SACK range containing more than two sender MSS beyond the
+  oldest unacknowledged byte triggers fast retransmission of that hole, even
+  when the ACK carries application data. This sufficient loss criterion comes
+  from [RFC 6675 section 4](https://www.rfc-editor.org/rfc/rfc6675.html#section-4).
+  This is limited oldest-hole detection, not a complete SACK scoreboard, RACK
+  or Tail Loss Probe implementation. Cumulative ACKs alone release payload.
+- Ranges must lie within transmitted data, including across sequence wrap.
+  Repeated reports of the same hole do not repeatedly request retransmission.
+  Cumulative progress permits recovery of the next hole.
+- `tcp-min-rto-200ms`, enabled by `meow-netstack`, lowers only the measured RTO
+  floor to 200 ms. The initial 1 second RTO, RTT/variance estimate, Karn's rule,
+  exponential backoff and 60 second ceiling remain. Without this feature the
+  upstream 1 second floor is retained. This deliberately differs from the
+  recommended floor in [RFC 6298](https://www.rfc-editor.org/rfc/rfc6298.html).
+  The reference gVisor sender also uses a 200 ms minimum; local measurements
+  and limits are recorded in the repository's OpenConnect benchmark report.
+
+Regression tests exercise data-bearing SACK, successive holes, repeated SACK,
+invalid/untransmitted ranges, sequence wrap, and timed tail loss with backoff.
