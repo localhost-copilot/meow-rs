@@ -2312,8 +2312,12 @@ async fn build_config(
         .iter()
         .map(|(name, proxy)| (name.clone(), Arc::downgrade(proxy)))
         .collect();
-    let lookup: meow_dns::client::ProxyLookup =
-        Arc::new(move |name| dns_proxies.get(name).and_then(std::sync::Weak::upgrade));
+    let lookup: meow_dns::client::ProxyLookup = Arc::new(move |name, _| {
+        dns_proxies
+            .get(name)
+            .and_then(std::sync::Weak::upgrade)
+            .map(|proxy| proxy as Arc<dyn meow_common::ProxyAdapter>)
+    });
     dns_config.resolver.set_proxy_lookup(Arc::clone(&lookup));
     if let Some(resolver) = &dns_config.proxy_resolver {
         resolver.set_proxy_lookup(lookup);

@@ -329,6 +329,7 @@ pub struct RawSimpleObfs {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawDns {
+    pub respect_rules: Option<bool>,
     pub ipv6: Option<bool>,
     pub cache_algorithm: Option<String>,
     pub enable: Option<bool>,

@@ -431,8 +431,19 @@ impl Tunnel {
     /// Attach a dedicated DNS resolver to this tunnel's live outbound registry.
     pub fn bind_dns_resolver(&self, resolver: &Resolver) {
         let weak = Arc::downgrade(&self.inner);
-        resolver.set_proxy_lookup(Arc::new(move |name| {
-            weak.upgrade()?.route.read().proxies.get(name).cloned()
+        resolver.set_proxy_lookup(Arc::new(move |name, metadata| {
+            let inner = weak.upgrade()?;
+            if name == meow_dns::client::RULES_OUTBOUND {
+                inner.resolve_proxy(metadata).map(|(proxy, _, _)| proxy)
+            } else {
+                inner
+                    .route
+                    .read()
+                    .proxies
+                    .get(name)
+                    .cloned()
+                    .map(|proxy| proxy as Arc<dyn ProxyAdapter>)
+            }
         }));
     }
 
@@ -647,6 +658,80 @@ impl Clone for Tunnel {
 
 #[cfg(test)]
 mod tests {
+    fn dns_test_answer(mut query: Vec<u8>) -> Vec<u8> {
+        let mut end = 12;
+        while query[end] != 0 {
+            end += usize::from(query[end]) + 1;
+        }
+        query.truncate(end + 5);
+        query[2..4].copy_from_slice(&[0x81, 0x80]);
+        query[6..12].copy_from_slice(&[0, 1, 0, 0, 0, 0]);
+        query.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 42]);
+        query
+    }
+
+    #[tokio::test]
+    async fn dns_respect_rules_routes_udp_and_preserves_explicit_tags() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut buffer = [0; 4096];
+            loop {
+                let (size, peer) = socket.recv_from(&mut buffer).await.unwrap();
+                let answer = dns_test_answer(buffer[..size].to_vec());
+                let mut wrong = answer.clone();
+                wrong[0] ^= 1;
+                socket.send_to(&wrong, peer).await.unwrap();
+                socket.send_to(&answer, peer).await.unwrap();
+            }
+        });
+        let config = meow_config::load_config_from_str(&format!(
+            "rules: ['MATCH,DIRECT']
+dns:
+  enable: true
+  respect-rules: true
+  use-system-hosts: false
+  nameserver: ['{addr}']
+  proxy-server-nameserver: ['{addr}']
+  direct-nameserver: ['{addr}']
+  nameserver-policy:
+    '+.explicit.test': ['{addr}#DIRECT']
+"
+        ))
+        .await
+        .unwrap();
+        let resolver = Arc::clone(&config.dns.resolver);
+        let tunnel = Tunnel::new(Arc::clone(&resolver));
+        tunnel.update_routing(config.proxies, config.rules);
+        let expected = Some("192.0.2.42".parse().unwrap());
+        assert_eq!(resolver.lookup_ipv4("routed.test").await, expected);
+        tunnel.update_rules(vec![meow_rules::parser::parse_rule(
+            "MATCH,REJECT",
+            &Default::default(),
+        )
+        .unwrap()]);
+        assert_eq!(resolver.lookup_ipv4("blocked.test").await, None);
+        assert_eq!(resolver.lookup_ipv4("tag.explicit.test").await, expected);
+        assert_eq!(
+            resolver
+                .direct_resolver()
+                .unwrap()
+                .lookup_ipv4("direct.test")
+                .await,
+            expected
+        );
+        assert_eq!(
+            config
+                .dns
+                .proxy_resolver
+                .unwrap()
+                .lookup_ipv4("proxy.test")
+                .await,
+            expected
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn dns_outbounds_follow_selection_reload_and_release_the_resolver() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -658,14 +743,7 @@ mod tests {
                 let len = stream.read_u16().await.unwrap();
                 let mut query = vec![0; usize::from(len)];
                 stream.read_exact(&mut query).await.unwrap();
-                let mut end = 12;
-                while query[end] != 0 {
-                    end += usize::from(query[end]) + 1;
-                }
-                query.truncate(end + 5);
-                query[2..4].copy_from_slice(&[0x81, 0x80]);
-                query[6..12].copy_from_slice(&[0, 1, 0, 0, 0, 0]);
-                query.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 42]);
+                let query = dns_test_answer(query);
                 stream.write_u16(query.len() as u16).await.unwrap();
                 stream.write_all(&query).await.unwrap();
             }
