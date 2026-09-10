@@ -180,7 +180,12 @@ TLS 1.2 / 1.3 下两端导出结果一致、不同连接密钥不同。完整 Bo
 给产品添加 OpenSSL bindings 就视为集成完成。新增
 [同进程共存探针](../../experiments/openconnect/coexistence/README.md)：
 动态加载 OpenSSL 3 后，macOS 上 1,000 次交错创建与释放上下文/会话通过。
-生产后端现采用同一库句柄解析 OpenSSL 3 公开 C API，未直接链接 openssl-sys。
+macOS/glibc 后端采用同一库句柄解析 OpenSSL 3 公开 C API，未直接链接 openssl-sys。
+OpenWrt ARM64 的 musl 后端静态构建 OpenSSL 3.6.3，对 ssl/crypto 两份归档所有
+全局定义及相互引用统一添加 `meow_oc_` 前缀；保留 libc 外部引用，不修改 BoringSSL。
+构建时核对完整定义集合和未解析引用，发现未隔离的 OpenSSL 符号即失败。
+禁用 DSO 和外部 provider 模块，静态 musl 可执行文件不依赖设备上的 `libssl`。
+两个后端共享相同的 OpenSSL 3 FFI、握手、重传和数据通道实现。
 Tokio AsyncFd 驱动非阻塞 datagram BIO 和 OpenSSL 握手重传计时器，敏感密钥
 使用 Zeroizing 保存。实际控制 TLS exporter 与 App-ID ClientHello 会话绑定已接入。
 

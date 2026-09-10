@@ -107,13 +107,18 @@ curl -fsS --max-time 30 --proxy socks5h://127.0.0.1:18080 \
 cargo build --release -p meow-app --features openconnect-dtls
 ```
 
-此 feature 隐含 `openconnect`，不加入默认构建。运行时需要 OpenSSL 3 的共享库：
-macOS 使用 Homebrew OpenSSL 3，glibc Linux 使用系统 `libssl.so.3`。
-为避免与 BoringSSL 的同名 C 符号混用，后端通过独立库句柄解析 OpenSSL API；
-glibc 使用 deep binding。macOS ARM64 与 Debian glibc Linux 已通过真实互通验证；
+此 feature 隐含 `openconnect`，不加入默认构建。macOS 使用 Homebrew OpenSSL 3，
+glibc Linux 使用系统 `libssl.so.3`；通过独立库句柄解析 OpenSSL API，glibc 使用
+deep binding，避免与 BoringSSL 的同名 C 符号混用。
+Linux musl（包括 OpenWrt）改用静态 OpenSSL 3.6.3，将两份归档的所有全局定义及其引用
+统一加上 `meow_oc_` 前缀，不依赖运行时 `libssl` 或动态加载。构建时检查符号隔离是否完整，
+有遗漏即失败；链接目录只包含改名后的库，libc 等外部引用保持原名。
+不会改变现有 BoringSSL 控制通道。
 最低 Rust 版本为 1.91，用户态 TCP 栈使用 smoltcp 0.14 的 CUBIC。
-Linux 验证使用 Rust 1.91 及 OpenSSL 3.0.20。
-musl、Windows、BSD 不在本阶段已验证支持范围。
+glibc Linux 验证使用 Rust 1.91 及 OpenSSL 3.0.20。
+Windows、BSD 不在本阶段已验证支持范围。OpenWrt 构建及验证方式见下节。
+OpenWrt ARM64 24.10.7 已通过真实内核 QEMU 验证，包括三种模式、双栈访问、UDP 阻断、
+原 TCP 连接的回退与恢复；详见 [验证记录](openconnect-openwrt-validation.md)。
 
 | `dtls-mode` | 行为 |
 | --- | --- |
@@ -152,6 +157,44 @@ cargo test --locked -p meow-app --no-default-features \
 docker build -f tests/openconnect/Dockerfile.client -t meow-openconnect-client:test .
 bash tests/openconnect/test_linux.sh
 ```
+
+## OpenWrt / musl 构建
+
+显式启用 `openconnect-dtls` 后，musl 使用与其他平台相同的 `off`／`auto`／`require`
+行为，不再因 musl 平台本身拒绝 DTLS。默认发布包仍不包含该可选 feature。
+现有 MIPS／32 位 musl 的 BoringSSL 构建限制没有因此解除。
+
+构建主机需要 Rust 1.91+、C/C++ 工具链、CMake、Perl、libclang、LLVM 的 `llvm-nm`
+和 `llvm-objcopy`。可以通过 `MEOW_OPENCONNECT_NM`、`MEOW_OPENCONNECT_OBJCOPY`
+指定这两个工具的路径。交叉编译沿用 cargo-zigbuild，示例：
+
+```bash
+rustup target add aarch64-unknown-linux-musl
+cargo zigbuild --locked --release --target aarch64-unknown-linux-musl \
+  -p meow-app --no-default-features --features minimal,openconnect-dtls
+bash openwrt/build-ipk.sh meow \
+  --binary target/aarch64-unknown-linux-musl/release/meow \
+  --version 0.21.2-openconnect1 --arch aarch64_generic --outdir target/openwrt-dtls-dist
+```
+
+Docker 验证构建提供完整工具链，包含 OpenSSL 重传／黑洞、socket 和应用模拟网关测试。
+构建主机与测试目标应同架构；x86_64 主机传入 `--build-arg RUST_TARGET=x86_64-unknown-linux-musl`。
+OpenWrt ARM64 的独立验证使用真实 OpenWrt 内核及用户空间，在 QEMU 内连接 Docker ocserv。
+不会创建宿主机 VPN 接口或修改宿主机防火墙；UDP 阻断只发生在虚拟机内。
+
+```bash
+docker build -t meow-openconnect-ocserv:test tests/openconnect
+docker build -f tests/openconnect/Dockerfile.musl -t meow-openconnect-musl:test .
+container=$(docker create meow-openconnect-musl:test)
+docker cp "$container:/usr/local/bin/meow" /tmp/meow-openconnect-musl
+docker rm "$container"
+MEOW_BINARY=/tmp/meow-openconnect-musl bash tests/openconnect/test_openwrt.sh
+```
+
+静态 OpenSSL 的安全更新需重新构建并替换 meow 二进制，升级设备上的 `libopenssl` 不会
+更新这份嵌入副本。源码版本锁定在 Cargo.lock，构建禁用动态库和外部 provider 模块。
+安装包的架构标签需匹配设备的 `opkg print-architecture`，ARM64 的 CPU 指令集兼容
+并不代表 `aarch64_generic` 标签会被每台设备的包管理器接受。
 
 ## 当前契约与限制
 
