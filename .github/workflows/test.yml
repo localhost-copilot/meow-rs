@@ -106,6 +106,7 @@ jobs:
       - name: OpenConnect CSTP and raw IP end-to-end (local fixtures only)
         run: |
           cargo test -p meow-netstack -p meow-openconnect
+          cargo test -p meow-smoltcp --lib --no-default-features --features std,medium-ip,proto-ipv4,proto-ipv6,socket-tcp,socket-tcp-cubic,socket-udp
           cargo test -p meow-config --features openconnect --test openconnect_config
           cargo test -p meow-app --features openconnect --test openconnect_e2e
 
