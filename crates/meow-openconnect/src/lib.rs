@@ -67,11 +67,17 @@ pub struct NetworkConfig {
 }
 
 impl NetworkConfig {
-    fn validate_packet(&self, packet: &[u8]) -> io::Result<()> {
+    fn accepts_packet(&self, packet: &[u8]) -> io::Result<bool> {
         validate_ip(packet, self.mtu)?;
-        if packet[0] >> 4 == 4 && self.address.is_none()
-            || packet[0] >> 4 == 6 && self.address6.is_none()
-        {
+        Ok(match packet[0] >> 4 {
+            4 => self.address.is_some(),
+            6 => self.address6.is_some(),
+            _ => unreachable!("validated IP version"),
+        })
+    }
+
+    fn validate_packet(&self, packet: &[u8]) -> io::Result<()> {
+        if !self.accepts_packet(packet)? {
             return Err(invalid("CSTP packet address family was not negotiated"));
         }
         Ok(())
@@ -394,12 +400,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 last_received.store(epoch.elapsed().as_secs(), Ordering::Relaxed);
                 match kind {
                     0 => {
-                        self.network.validate_packet(&payload)?;
+                        // Some gateways send IPv6 traffic even on IPv4-only
+                        // sessions. Discard it without disrupting the negotiated
+                        // family; malformed packets remain protocol errors.
+                        if !self.network.accepts_packet(&payload)? {
+                            continue;
+                        }
                         incoming.send(payload).await.map_err(|_| closed())?;
                     }
                     8 => {
                         let packet = decoder.decode(&payload, self.network.mtu)?;
-                        self.network.validate_packet(&packet)?;
+                        if !self.network.accepts_packet(&packet)? {
+                            continue;
+                        }
                         incoming.send(packet).await.map_err(|_| closed())?;
                     }
                     3 => control_tx.send(4).await.map_err(|_| closed())?,
