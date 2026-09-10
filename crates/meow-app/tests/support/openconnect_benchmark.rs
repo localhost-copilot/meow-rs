@@ -261,10 +261,14 @@ async fn workload(address: SocketAddr, mode: &str, container: &str) {
         }
         latency(mode, "udp128", sample, rtts);
     }
+    let udp_payload =
+        usize::from(Profile::selected().server_mtu() - if mode == "off" { 28 } else { 66 } - 28)
+            .min(1200);
+    println!("BENCH_UDP_PAYLOAD,{mode},{udp_payload}");
     for sample in 1..=3 {
         let mut received = vec![false; 8192];
         let mut packet = header.to_vec();
-        packet.resize(1210, 0x5a);
+        packet.resize(header.len() + udp_payload, 0x5a);
         let start = Instant::now();
         for batch in 0..512 {
             for offset in 0..16 {
@@ -282,7 +286,7 @@ async fn workload(address: SocketAddr, mode: &str, container: &str) {
                 };
                 let (n, from) = result.unwrap();
                 assert_eq!(from, udp_address);
-                assert_eq!(n, 1210);
+                assert_eq!(n, header.len() + udp_payload);
                 assert_eq!(&answer[..10], &header);
                 assert!(answer[14..n].iter().all(|b| *b == 0x5a));
                 let sequence = u32::from_be_bytes(answer[10..14].try_into().unwrap()) as usize;
@@ -299,7 +303,7 @@ async fn workload(address: SocketAddr, mode: &str, container: &str) {
         println!(
             "BENCH_UDP,{mode},16,{sample},8192,{count},{:.3},{:.3}",
             seconds * 1000.0,
-            (count * 1200) as f64 / 1048576.0 / seconds
+            (count * udp_payload) as f64 / 1048576.0 / seconds
         );
     }
     inspect_session(container, mode).await;
