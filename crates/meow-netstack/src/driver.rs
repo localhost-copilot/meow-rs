@@ -2,9 +2,7 @@ use crate::{closed, device::RawIp, Flow, Packet, MAX_SOCKETS, SOCKET_BUFFER, TCP
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::{Duration as SmolDuration, Instant as SmolInstant};
-use smoltcp::wire::{
-    HardwareAddress, IpAddress, IpCidr, IpProtocol, Ipv4Packet, Ipv6Packet, TcpPacket,
-};
+use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::io;
@@ -282,16 +280,20 @@ impl Driver {
                 packet = incoming.recv(), if self.device.incoming.len() < 64 => {
                     // Let the IP stack process a short ready batch before
                     // emitting ACKs, without waiting or starving control work.
+                    // A data packet can also acknowledge our outgoing TCP data.
+                    // Preserve that ACK clock while any TCP sender has data queued.
+                    let sending = self.entries.iter().any(|entry| {
+                        matches!(entry.socket, Socket::Tcp(_))
+                            && self.sockets.get::<tcp::Socket>(entry.handle).send_queue() != 0
+                    });
                     let mut next = Some(packet.ok_or_else(closed)?);
                     while let Some(packet) = next {
                         if packet.len() > self.device.mtu { return Err(io::Error::new(io::ErrorKind::InvalidData, "incoming IP packet exceeds MTU")); }
                         // Small ACK/control packets release send credits and
                         // should reach the stack without further coalescing.
-                        // Preserve piggybacked ACKs for this flow's sender;
-                        // unrelated uploads must not disable download batching.
-                        let immediate = packet.len() <= 128 || self.acknowledges_queued_data(&packet);
+                        let small = packet.len() <= 128;
                         self.device.incoming.push_back(packet);
-                        if immediate || self.device.incoming.len() >= 8 { break; }
+                        if sending || small || self.device.incoming.len() >= 8 { break; }
                         next = incoming.try_recv().ok();
                     }
                 },
@@ -300,44 +302,6 @@ impl Driver {
                 },
                 _ = poll_fn(|cx| Self::pump(&mut self.entries, &mut self.sockets, tcp_send_limit, tcp_total_limit, cx)) => {},
             }
-        }
-    }
-
-    fn acknowledges_queued_data(&self, packet: &[u8]) -> bool {
-        let queued = |payload: &[u8]| {
-            let Ok(packet) = TcpPacket::new_checked(payload) else {
-                return true;
-            };
-            packet.ack()
-                && self.entries.iter().any(|entry| {
-                    // Ports are unique across all live entries in this stack.
-                    entry.port == packet.dst_port()
-                        && matches!(entry.socket, Socket::Tcp(_))
-                        && self.sockets.get::<tcp::Socket>(entry.handle).send_queue() != 0
-                })
-        };
-        match packet.first().map(|byte| byte >> 4) {
-            Some(4) => {
-                let Ok(packet) = Ipv4Packet::new_checked(packet) else {
-                    return true;
-                };
-                if packet.more_frags() || packet.frag_offset() != 0 {
-                    return true;
-                }
-                packet.next_header() == IpProtocol::Tcp && queued(packet.payload())
-            }
-            Some(6) => {
-                let Ok(packet) = Ipv6Packet::new_checked(packet) else {
-                    return true;
-                };
-                match packet.next_header() {
-                    IpProtocol::Tcp => queued(packet.payload()),
-                    IpProtocol::Udp => false,
-                    // Leave extension headers and fragments to the IP stack.
-                    _ => true,
-                }
-            }
-            _ => true,
         }
     }
 
