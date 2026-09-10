@@ -8,7 +8,7 @@ the canonical, in-repo source a release is cut from.
 
 ## [Unreleased]
 
-## [0.23.0] - 2026-09-10
+## [0.23.1] - 2026-09-10
 
 ### Added
 
@@ -29,6 +29,8 @@ the canonical, in-repo source a release is cut from.
 
 ### Fixed
 
+- Compile AnyConnect certificate-expiry checks with the platform's `time_t`,
+  including 32-bit ARMv7.
 - Keep IPv4-only AnyConnect sessions alive when unsolicited IPv6 packets arrive.
 - Preserve asynchronous BoringSSL BIO retry state during flush.
 - Send AnyTLS UDP data before waiting for stream acknowledgement; apply the
@@ -44,8 +46,14 @@ the canonical, in-repo source a release is cut from.
 - Local DTLS four-flow iperf upload remains 10.3% slower than the measured
   mihomo reference; four-flow bidirectional TCP echo remains 33.5% slower.
   Further performance work is separate from this compatibility release.
-- See [release notes](docs/releases/v0.23.0.md) and
+- See [release notes](docs/releases/v0.23.1.md) and
   [the complete benchmark](docs/benchmarks/mihomo-yaml-parity-2026-09-10.md).
+
+## [0.23.0] - Unpublished tag
+
+The release build stopped at the ARMv7 certificate time conversion. No GitHub
+binary release was published. Version 0.23.1 includes the compatibility changes
+and the ARMv7 build fix; the original tag is retained.
 
 ## Earlier development notes (through v0.22.0)
 
