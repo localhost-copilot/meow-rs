@@ -27,6 +27,47 @@ use tokio::time::{timeout, Duration};
 
 const T: Duration = Duration::from_secs(5);
 
+#[cfg(feature = "encrypted")]
+#[tokio::test]
+async fn encrypted_nameservers_send_tls_through_the_selected_proxy() {
+    for is_https in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = [0; 5];
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header[0], 22, "proxy must carry a TLS handshake");
+            assert_eq!(header[1], 3);
+            let length = u16::from_be_bytes([header[3], header[4]]) as usize;
+            let mut hello = vec![0; length];
+            stream.read_exact(&mut hello).await.unwrap();
+            assert!(hello
+                .windows(b"resolver.test".len())
+                .any(|v| v == b"resolver.test"));
+            // No trusted certificate: DNS must fail, never fall back to a
+            // plaintext exchange or an unselected direct socket.
+        });
+        let dialed = Arc::new(Mutex::new(Vec::new()));
+        let proxy: Arc<dyn Proxy> = Arc::new(MockProxy {
+            name: "encrypted-dns".into(),
+            dialed: Arc::clone(&dialed),
+        });
+        let client = if is_https {
+            DnsClient::doh(addr, "resolver.test", "/dns-query")
+        } else {
+            DnsClient::dot(addr, "resolver.test")
+        }
+        .with_proxy(proxy);
+        assert!(timeout(T, client.query("example.com", RecordType::A))
+            .await
+            .unwrap()
+            .is_err());
+        timeout(T, peer).await.unwrap().unwrap();
+        assert_eq!(*dialed.lock(), vec![addr]);
+    }
+}
+
 /// Start a stub DNS-over-TCP server that always answers `A example.com.` →
 /// `203.0.113.7`. Returns the bound address.
 async fn start_dns_tcp_stub() -> SocketAddr {

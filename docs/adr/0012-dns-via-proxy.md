@@ -1,6 +1,6 @@
 # ADR 0012: Route DNS clients through a proxy adapter (`#PROXY` nameserver suffix)
 
-- **Status:** Proposed
+- **Status:** Implemented for UDP/TCP (TCP relay), DoT and DoH
 - **Date:** 2026-05-19
 - **Author:** Claude (on behalf of @madeye)
 - **Related:** issue #67, PR #88 (per-proxy DNS for `type: direct`)
@@ -26,13 +26,10 @@ This ADR proposes the syntax, the loop-prevention rules, and the layering for im
 
 ### Syntax
 
-Extend `NameServerUrl` (`crates/meow-dns/src/upstream.rs`) so each variant carries an optional `proxy: Option<String>`:
+`NameServerEntry` (`crates/meow-dns/src/upstream.rs`) wraps the transport URL and proxy route:
 
 ```rust
-NameServerUrl::Udp { addr, port, proxy: Option<String> }
-NameServerUrl::Tcp { addr, port, proxy: Option<String> }
-NameServerUrl::Tls { addr, port, sni, proxy: Option<String> }
-NameServerUrl::Https { addr, port, path, sni, proxy: Option<String> }
+NameServerEntry { url: NameServerUrl, proxy: Option<String> }
 ```
 
 Surface syntax:
@@ -42,11 +39,11 @@ Surface syntax:
 | `1.1.1.1` / `1.1.1.1:53` | Plain UDP, global resolver (unchanged) |
 | `1.1.1.1#PROXY-JP` | Plain UDP, **but tunneled over PROXY-JP** |
 | `tcp://1.1.1.1:53#PROXY-JP` | TCP DNS over PROXY-JP |
-| `tls://1.1.1.1#dns.google` | DoT, current SNI fragment semantics (no proxy) |
-| `tls://1.1.1.1#dns.google?proxy=PROXY-JP` | DoT over PROXY-JP (new — query-string disambiguator for TLS/HTTPS) |
-| `https://1.1.1.1/dns-query#cloudflare-dns.com?proxy=PROXY-JP` | DoH over PROXY-JP |
+| `tls://1.1.1.1#PROXY-JP` | DoT over PROXY-JP, certificate checked against 1.1.1.1 |
+| `tls://1.1.1.1#PROXY-JP&sni=cloudflare-dns.com` | DoT over PROXY-JP with explicit TLS name |
+| `https://1.1.1.1/dns-query#PROXY-JP` | DoH over PROXY-JP |
 
-The collision with SNI on `tls://` / `https://` URLs (which already use `#` for SNI) is resolved with a **query-string parameter** `?proxy=NAME` rather than a second fragment. This keeps the existing SNI semantics intact and avoids ambiguity.
+All YAML nameserver entries use mihomo's fragment semantics: a bare fragment names the proxy; `sni=NAME` is a separate fragment parameter. The earlier proposal to interpret encrypted nameserver fragments as SNI caused a configured group name to reach TLS certificate verification and has been superseded. The low-level `NameServerUrl::parse` API retains its explicit SNI form; configuration uses `NameServerEntry::parse`.
 
 For plain UDP/TCP nameservers (no SNI), the `#PROXY-NAME` suffix reuses the existing fragment slot, matching upstream Clash syntax.
 
@@ -89,7 +86,7 @@ async fn tcp_exchange(addr: SocketAddr, wire: &[u8], proxy: Option<&Arc<dyn Prox
 
 For UDP-via-proxy, fall through to TCP DNS automatically (most proxies don't relay arbitrary UDP). Document this in the config docs — users wanting true UDP-over-proxy must set `udp: true` on the proxy AND use `tcp://` URL form (the TCP fallback is the safer default).
 
-For DoT/DoH, layer `tokio_rustls` / HTTP/1.1 over the `Box<dyn AsyncRead+AsyncWrite>` exactly as today — the existing TLS connector is generic over `IO: AsyncRead + AsyncWrite + Unpin`.
+For DoT/DoH, layer `meow_transport::tls::TlsLayer` over the chosen proxy connection. The nameserver's TLS authentication and DoH Host header use its own name, independently of the proxy's TLS settings. A failed proxy or TLS handshake never falls back to direct transport.
 
 ### Proxy registry threading
 
