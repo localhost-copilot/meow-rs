@@ -297,6 +297,16 @@ async fn connect_inner<S: AsyncRead + AsyncWrite + Unpin>(
     if address6.is_some() && mtu < 1280 {
         return Err(invalid("CSTP IPv6 MTU below 1280"));
     }
+    let compression = compression.unwrap_or_default();
+    tracing::debug!(
+        base_mtu = settings.base_mtu,
+        requested_mtu = options.mtu,
+        cstp_mtu = mtu,
+        cstp_compression = ?compression,
+        ipv4 = address.is_some(),
+        ipv6 = address6.is_some(),
+        "OpenConnect transport parameters"
+    );
     Ok(Connection {
         stream,
         network: NetworkConfig {
@@ -311,7 +321,7 @@ async fn connect_inner<S: AsyncRead + AsyncWrite + Unpin>(
             settings.dpd_interval
         },
         keepalive,
-        compression: compression.unwrap_or_default(),
+        compression,
         #[cfg(feature = "dtls")]
         dtls: match offer {
             Some(offer) => {
