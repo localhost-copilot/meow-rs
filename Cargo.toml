@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/meow-common",
+    "crates/meow-netstack",
+    "crates/meow-openconnect",
     "crates/meow-trie",
     "crates/meow-anytls",
     "crates/meow-lwip",
@@ -24,6 +26,18 @@ codegen-units = 1
 panic = "abort"
 opt-level = "z"
 
+# OpenConnect's userspace packet path is sensitive to checksum and per-packet
+# dispatch costs; keep speed optimizations here while retaining the size policy
+# for the rest of the app.
+[profile.release.package.smoltcp]
+opt-level = 3
+
+[profile.release.package.meow-netstack]
+opt-level = 3
+
+[profile.release.package.meow-openconnect]
+opt-level = 3
+
 # Profile for dhat heap profiling — keeps debug symbols, no strip, no LTO.
 [profile.dhat]
 inherits = "release"
@@ -35,7 +49,7 @@ opt-level = 1
 [workspace.package]
 version = "0.21.2"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.91"
 license = "MIT"
 repository = "https://github.com/meow-rs/meow-rs"
 homepage = "https://meow-rs.github.io/meow-rs/"
@@ -246,6 +260,8 @@ proptest = "1"
 # default-features = false on feature-gated crates so each consumer controls
 # which optional protocols/listeners are compiled (M2.E feature-flag infra).
 meow-common = { path = "crates/meow-common", version = "0.21.2" }
+meow-netstack = { path = "crates/meow-netstack", version = "0.21.2" }
+meow-openconnect = { path = "crates/meow-openconnect", version = "0.21.2" }
 meow-trie = { path = "crates/meow-trie", version = "0.21.2" }
 # Vendored anytls fork (lib name `anytls_rs`); optional, pulled in only by
 # meow-proxy's `anytls` feature.

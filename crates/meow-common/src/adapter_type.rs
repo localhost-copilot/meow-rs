@@ -20,6 +20,7 @@ pub enum AdapterType {
     Hysteria2,
     Anytls,
     Snell,
+    OpenConnect,
 }
 
 impl fmt::Display for AdapterType {
@@ -42,6 +43,7 @@ impl fmt::Display for AdapterType {
             AdapterType::Hysteria2 => write!(f, "Hysteria2"),
             AdapterType::Anytls => write!(f, "AnyTLS"),
             AdapterType::Snell => write!(f, "Snell"),
+            AdapterType::OpenConnect => write!(f, "OpenConnect"),
         }
     }
 }

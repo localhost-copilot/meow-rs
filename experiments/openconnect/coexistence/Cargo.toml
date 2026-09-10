@@ -1,0 +1,16 @@
+[package]
+name = "meow-dtls-coexistence-probe"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+license = "MIT"
+
+[workspace]
+
+[dependencies]
+boring = "=4.22.0"
+libloading = "=0.8.9"
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"

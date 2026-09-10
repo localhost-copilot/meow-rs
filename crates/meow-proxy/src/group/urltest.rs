@@ -283,6 +283,10 @@ impl ProxyAdapter for UrlTestGroup {
         self.usage.touch_user_traffic(metadata);
         self.fastest_proxy()
     }
+    fn unwrap_udp_proxy(&self, metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
+        self.usage.touch_user_traffic(metadata);
+        self.pick_for_dial()
+    }
 
     fn health(&self) -> &ProxyHealth {
         &self.health

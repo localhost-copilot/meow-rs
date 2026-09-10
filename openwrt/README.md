@@ -15,3 +15,10 @@ Packaging sources for the official OpenWrt `.ipk` release artifacts
 Release wiring lives in `.github/workflows/release.yml` (ipk matrix), the
 QEMU end-to-end test in `tests/test_openwrt_qemu.sh`, and user-facing
 documentation in [docs/openwrt.md](../docs/openwrt.md).
+
+OpenConnect DTLS is opt-in (`minimal,openconnect-dtls` or `full,openconnect-dtls`).
+ARM64 musl builds embed a symbol-prefixed OpenSSL and require no device `libssl`.
+See [build instructions](../docs/openconnect.md#openwrt--musl-构建) and
+[OpenWrt DTLS validation](../docs/openconnect-openwrt-validation.md).
+The default release feature set remains unchanged. Packages include the OpenSSL
+license for builds that embed it.

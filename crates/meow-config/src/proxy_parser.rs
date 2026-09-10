@@ -63,6 +63,12 @@ impl ProxyAdapter for WrappedProxy {
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
         self.adapter.dial_udp(metadata).await
     }
+    async fn resolve_udp_destination(
+        &self,
+        metadata: &Metadata,
+    ) -> Result<Option<meow_common::adapter::ResolvedUdpDestination>> {
+        self.adapter.resolve_udp_destination(metadata).await
+    }
     async fn connect_over(
         &self,
         stream: Box<dyn ProxyConn>,
@@ -122,6 +128,14 @@ pub fn parse_proxy_with_dialer(
         .ok_or("missing proxy type")?;
 
     match proxy_type {
+        #[cfg(feature = "openconnect")]
+        "openconnect" => {
+            reject_unthreaded_dialer(name, "openconnect", dialer)?;
+            let adapter = parse_openconnect(config)?;
+            Ok(Arc::new(WrappedProxy::new(Box::new(adapter))))
+        }
+        #[cfg(not(feature = "openconnect"))]
+        "openconnect" => Err(feature_gated_proxy_type("openconnect")),
         #[cfg(feature = "ss")]
         "ss" => {
             let server = config
@@ -297,6 +311,146 @@ pub fn parse_proxy_with_dialer(
     }
 }
 
+#[cfg(feature = "openconnect")]
+fn parse_openconnect(
+    config: &HashMap<String, serde_yaml::Value>,
+) -> std::result::Result<meow_proxy::openconnect_adapter::OpenConnectAdapter, String> {
+    // Strict decoding prevents an unsupported authentication/DTLS setting from
+    // being silently accepted while the node runs with different semantics.
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    struct Options {
+        name: String,
+        #[serde(rename = "type")]
+        _kind: String,
+        server: String,
+        port: Option<u16>,
+        cookie: Option<String>,
+        username: Option<String>,
+        password: Option<String>,
+        authgroup: Option<String>,
+        protocol: Option<String>,
+        server_name: Option<String>,
+        ca: Option<String>,
+        mtu: Option<u16>,
+        handshake_timeout: Option<u64>,
+        ipv6_disabled: Option<bool>,
+        udp: Option<bool>,
+        dtls_mode: Option<String>,
+        compression: Option<String>,
+        dialer_proxy: Option<String>,
+        remote_dns_resolve: Option<bool>,
+        dns: Option<Vec<String>>,
+    }
+    let value = serde_yaml::to_value(config)
+        .map_err(|_| "openconnect: invalid configuration".to_owned())?;
+    let options: Options =
+        serde_yaml::from_value(value).map_err(|e| format!("openconnect: {e}"))?;
+    if options.protocol.as_deref().unwrap_or("anyconnect") != "anyconnect" {
+        return Err("openconnect: only protocol: anyconnect is supported".into());
+    }
+    use meow_proxy::openconnect_adapter::DtlsMode;
+    let default_dtls = if cfg!(all(feature = "openconnect-dtls", unix)) {
+        "auto"
+    } else {
+        "off"
+    };
+    let dtls_mode = match options.dtls_mode.as_deref().unwrap_or(default_dtls) {
+        "off" => DtlsMode::Off,
+        "auto" => DtlsMode::Auto,
+        "require" => DtlsMode::Require,
+        _ => return Err("openconnect: dtls-mode must be off, auto or require".into()),
+    };
+    if dtls_mode != DtlsMode::Off && !cfg!(all(feature = "openconnect-dtls", unix)) {
+        return Err(
+            "openconnect: DTLS requires --features openconnect-dtls on a supported Unix platform"
+                .into(),
+        );
+    }
+    if options.compression.as_deref().unwrap_or("off") != "off" {
+        return Err("openconnect: compression is not supported".into());
+    }
+    if options.dialer_proxy.is_some() {
+        return Err("openconnect: dialer-proxy is not supported".into());
+    }
+    // The first version accepts a bare DNS name or IP literal, not a URL with
+    // ambiguous group/path or port precedence. The CSTP endpoint path is fixed.
+    if options.server.contains(['/', '@', '?', '#', '[', ']'])
+        || (options.server.contains(':') && options.server.parse::<std::net::IpAddr>().is_err())
+    {
+        return Err(
+            "openconnect: server must be a bare hostname or IP; use port separately".into(),
+        );
+    }
+    let roots = if let Some(path) = options.ca {
+        let pem =
+            std::fs::read(path).map_err(|e| format!("openconnect: cannot read CA file: {e}"))?;
+        let roots = rustls_pemfile::certs(&mut pem.as_slice())
+            .map(|cert| cert.map(|cert| cert.to_vec()))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| "openconnect: invalid CA PEM".to_owned())?;
+        if roots.is_empty() {
+            return Err("openconnect: CA file contains no certificates".into());
+        }
+        roots
+    } else {
+        Vec::new()
+    };
+    let credentials = match (options.username, options.password, options.authgroup) {
+        (None, None, None) => None,
+        (Some(username), Some(password), authgroup) if options.cookie.is_none() => {
+            Some(meow_proxy::openconnect_adapter::Credentials {
+                username,
+                password,
+                authgroup,
+            })
+        }
+        _ => {
+            return Err(
+                "openconnect: use either cookie or username/password with optional authgroup"
+                    .into(),
+            )
+        }
+    };
+    let dns = options
+        .dns
+        .unwrap_or_default()
+        .iter()
+        .map(|server| {
+            server
+                .parse::<std::net::IpAddr>()
+                .map(|ip| std::net::SocketAddr::new(ip, 53))
+                .or_else(|_| server.parse::<std::net::SocketAddr>())
+                .map_err(|_| {
+                    "openconnect: DNS servers must be IP literals with optional ports".to_owned()
+                })
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    meow_proxy::openconnect_adapter::OpenConnectAdapter::new(
+        &options.name,
+        meow_proxy::openconnect_adapter::Options {
+            server_name: options
+                .server_name
+                .unwrap_or_else(|| options.server.clone()),
+            server: options.server,
+            port: options.port.unwrap_or(443),
+            cookie: options.cookie,
+            credentials,
+            additional_roots: roots,
+            mtu: options.mtu.unwrap_or(1400),
+            handshake_timeout: std::time::Duration::from_secs(
+                options.handshake_timeout.unwrap_or(15),
+            ),
+            udp: options.udp.unwrap_or(true),
+            ipv6: !options.ipv6_disabled.unwrap_or(true),
+            remote_dns_resolve: options.remote_dns_resolve.unwrap_or(false),
+            dns,
+            dtls_mode,
+        },
+    )
+    .map_err(|e| format!("openconnect: {e}"))
+}
+
 /// Whether `plugin` names a SIP003 plugin that runs as an external subprocess
 /// (as opposed to one of the built-in, in-process plugin implementations).
 ///
@@ -363,9 +517,13 @@ fn reject_unthreaded_dialer(
     feature = "anytls",
     feature = "hysteria2",
     feature = "vmess",
-    feature = "snell"
+    feature = "snell",
+    feature = "openconnect"
 )))]
 fn feature_gated_proxy_type(proxy_type: &str) -> String {
+    if proxy_type == "openconnect" {
+        return "proxy type 'openconnect' is not compiled into this build; rebuild with `--features openconnect`".into();
+    }
     format!(
         "proxy type '{proxy_type}' is not compiled into this build; \
          use an official release binary or rebuild with `--features full` \

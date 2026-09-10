@@ -181,6 +181,9 @@ impl ProxyAdapter for LoadBalanceGroup {
     fn unwrap_proxy(&self, metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
         self.select(metadata)
     }
+    fn unwrap_udp_proxy(&self, metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
+        self.select_udp(metadata)
+    }
 
     fn health(&self) -> &ProxyHealth {
         &self.health

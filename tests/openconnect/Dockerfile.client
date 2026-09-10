@@ -1,0 +1,12 @@
+# Linux/glibc packaging and MSRV verification for the optional DTLS backend.
+FROM rust:1.91-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang libclang-dev cmake pkg-config libssl-dev openssl curl \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /work
+COPY . .
+RUN cargo test --locked -p meow-openconnect --features dtls --lib --test dtls_backend -- --include-ignored
+RUN cargo test --locked -p meow-netstack --test sockets
+RUN cargo test --locked -p meow-app --no-default-features --features openconnect-dtls,listener-mixed --test openconnect_e2e
+RUN cargo build --locked --release -p meow-app --no-default-features --features openconnect-dtls,listener-mixed
+CMD ["/work/target/release/meow", "-f", "/fixture/client.yaml"]
