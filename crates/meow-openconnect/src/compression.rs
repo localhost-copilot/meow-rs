@@ -31,7 +31,7 @@ impl Mode {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Encoding {
     #[default]
     Identity,

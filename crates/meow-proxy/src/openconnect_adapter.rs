@@ -459,6 +459,11 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
         let negotiated = std::mem::replace(&mut connection.dtls, Ok(None));
         let dtls = match negotiated {
             Ok(Some(mut settings)) => {
+                tracing::debug!(
+                    dtls_mtu = settings.mtu,
+                    dtls_compression = ?settings.compression,
+                    "OpenConnect DTLS parameters"
+                );
                 settings.local_port = parameters.advanced.dtls_local_port;
                 settings.connector = Some(Arc::clone(&parameters.underlay)
                     as Arc<dyn meow_openconnect::dtls::DatagramConnector>);
