@@ -224,10 +224,21 @@ async fn external_ui_serves_static_directory() {
     });
     let app = create_router(state);
 
-    // `/ui` resolves index.html in the directory.
+    // The trailing slash keeps relative asset URLs inside /ui/.
     let resp = app
         .clone()
         .oneshot(Request::get("/ui").body(axum::body::Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(resp.headers()["location"], "/ui/");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::get("/ui/")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -244,6 +255,73 @@ async fn external_ui_serves_static_directory() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(body_string(resp).await.contains("console.log"));
+}
+
+#[tokio::test]
+async fn named_external_ui_preserves_dashboard_paths_and_api_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["zashboard", "metacubexd"] {
+        let dashboard = dir.path().join(name);
+        std::fs::create_dir_all(dashboard.join("assets")).unwrap();
+        std::fs::write(
+            dashboard.join("index.html"),
+            format!("<title>{name}</title><script src=\"./assets/app.js\"></script>"),
+        )
+        .unwrap();
+        std::fs::write(dashboard.join("assets/app.js"), "console.log('dashboard')").unwrap();
+    }
+    let config = meow_config::load_config_from_str(
+        &serde_yaml::to_string(&serde_json::json!({
+            "external-ui": dir.path(),
+            "external-ui-name": "zashboard",
+            "secret": "test-dashboard-token"
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut state = test_state_default();
+    let inner = Arc::get_mut(&mut state).unwrap();
+    inner.external_ui = config.api.external_ui;
+    inner.secret = config.api.secret;
+    *inner.raw_config.write() = config.raw;
+    let app = create_router(state);
+
+    for name in ["zashboard", "metacubexd"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/ui/{name}/"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(body_string(response)
+            .await
+            .contains(&format!("<title>{name}</title>")));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/ui/{name}/assets/app.js"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_string(response).await, "console.log('dashboard')");
+    }
+    let response = app
+        .oneshot(
+            Request::get("/version")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 // ── Existing endpoint tests ──────────────────────────────────────

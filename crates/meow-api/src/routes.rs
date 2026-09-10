@@ -4,7 +4,7 @@ use axum::{
     extract::{FromRequestParts, Path, Query, Request, State},
     http::{header, request::Parts, StatusCode},
     middleware::{self, Next},
-    response::{IntoResponse, Json, Response},
+    response::{IntoResponse, Json, Redirect, Response},
     routing::{delete, get, post, put},
     Router,
 };
@@ -250,10 +250,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let router = api;
     let router = if let Some(dir) = state.external_ui.clone() {
         // `ServeDir` resolves `index.html` for the directory root and serves
-        // any nested asset; `nest_service("/ui", …)` strips the `/ui` prefix so
-        // both `/ui` and `/ui/<asset>` resolve. Dashboards (metacubexd, yacd)
-        // use hash routing, so no server-side SPA fallback is required.
-        router.nest_service("/ui", tower_http::services::ServeDir::new(dir))
+        // nested assets. Keep the trailing slash so the browser resolves
+        // relative asset URLs under /ui/. Dashboards use hash routing.
+        router
+            .route("/ui", get(|| async { Redirect::temporary("/ui/") }))
+            .nest_service("/ui/", tower_http::services::ServeDir::new(dir))
     } else {
         router
             .route("/ui", get(ui::serve_ui))

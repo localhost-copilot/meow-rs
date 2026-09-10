@@ -147,9 +147,8 @@ pub struct RawConfig {
     /// (e.g. metacubexd, yacd). When set, it is served at `/ui` instead of the
     /// built-in panel (issue #223, mihomo-compatible).
     pub external_ui: Option<String>,
-    /// Optional sub-directory under `external-ui` that actually holds the UI
-    /// files. Mirrors mihomo's `external-ui-name`; the served directory is
-    /// `external-ui/external-ui-name` when set.
+    /// Optional download subdirectory under `external-ui`. The served root
+    /// stays at `external-ui`, so a named dashboard is available at `/ui/<name>/`.
     pub external_ui_name: Option<String>,
     /// URL the UI archive can be downloaded from. Recorded for compatibility;
     /// auto-download is not performed (see issue #223 notes).

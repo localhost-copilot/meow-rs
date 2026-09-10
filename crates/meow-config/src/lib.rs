@@ -410,7 +410,7 @@ pub struct ApiConfig {
     pub secret: Option<String>,
     /// Resolved directory of static files for a third-party web UI, served at
     /// `/ui` in place of the built-in panel. `None` keeps the built-in panel.
-    /// Already joined with `external-ui-name` when that was set (issue #223).
+    /// `external-ui-name` selects a download subdirectory, not the served root.
     pub external_ui: Option<PathBuf>,
     /// Download URL recorded from `external-ui-url`; auto-download is not
     /// performed, but it is surfaced in a warning when the directory is absent.
@@ -2269,14 +2269,7 @@ async fn build_config(
         .external_ui
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(|base| {
-            let mut dir = PathBuf::from(base);
-            // mihomo nests the actual files under `external-ui-name` when present.
-            if let Some(name) = raw.external_ui_name.as_deref().filter(|s| !s.is_empty()) {
-                dir.push(name);
-            }
-            dir
-        });
+        .map(PathBuf::from);
     let api = ApiConfig {
         external_controller: parse_optional_socket_addr(
             "external-controller",
