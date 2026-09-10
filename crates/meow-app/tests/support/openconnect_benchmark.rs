@@ -136,6 +136,39 @@ pub async fn run(yaml: &str, mode: &str, container: &str) {
 }
 
 async fn workload(address: SocketAddr, mode: &str, container: &str) {
+    if let Ok(delay) = std::env::var("MEOW_BENCH_DELAY_MS") {
+        let delay: u32 = delay
+            .parse()
+            .expect("MEOW_BENCH_DELAY_MS must be an integer");
+        assert!((1..=1000).contains(&delay));
+        // Delay the isolated fixture's egress only; this adds the stated amount
+        // to RTT without changing host interfaces or production services.
+        let output = tokio::process::Command::new("docker")
+            .args([
+                "exec",
+                container,
+                "tc",
+                "qdisc",
+                "add",
+                "dev",
+                "eth0",
+                "root",
+                "netem",
+                "limit",
+                "100000",
+                "delay",
+                &format!("{delay}ms"),
+            ])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture netem failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        println!("BENCH_ADDED_RTT_MS,{mode},{delay}");
+    }
     let (mut warm, _) = super::socks_target(address, 1, "192.0.2.1:8080".parse().unwrap()).await;
     warm.write_all(&[0x5a; 128]).await.unwrap();
     let mut answer = [0; 128];
