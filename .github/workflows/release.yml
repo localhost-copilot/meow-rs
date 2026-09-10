@@ -22,7 +22,7 @@ jobs:
       matrix:
         include:
           # Every release target builds with the meow-app default feature set
-          # (`full`; TLS is BoringSSL). Targets that cannot link boring-sys
+          # (`full`, including OpenConnect; TLS is BoringSSL). Targets that cannot link boring-sys
           # (MIPS, 32-bit musl, windows-gnu) are not shipped and — since the
           # rustls backend was removed — cannot be built with TLS at all.
           # Linux musl
@@ -104,6 +104,10 @@ jobs:
       - run: cargo install --locked cargo-zigbuild
         if: runner.os == 'Linux'
 
+      - name: Install static DTLS build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y llvm clang libclang-dev cmake perl
+
       - name: Build release binary
         shell: bash
         run: |
@@ -181,6 +185,9 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/meow" "${staging}/"
             cp README.md LICENSE "${staging}/" 2>/dev/null || true
+            if [[ "${{ matrix.target }}" == *-linux-musl ]]; then
+              cp openwrt/meow/files/OpenSSL.LICENSE "${staging}/"
+            fi
             tar -C dist -czf "${name}.tar.gz" "${name}"
             sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256"
             echo "archive=${name}.tar.gz" >> "$GITHUB_OUTPUT"
