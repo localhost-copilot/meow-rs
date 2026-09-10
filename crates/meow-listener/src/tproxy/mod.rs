@@ -2,6 +2,8 @@ mod firewall;
 #[cfg(target_os = "linux")]
 mod linux;
 mod orig_dest;
+#[cfg(target_os = "linux")]
+mod udp;
 
 use crate::sniffer::SnifferRuntime;
 use firewall::FirewallGuard;
@@ -142,6 +144,12 @@ impl TProxyListener {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let bound_addr = listener.local_addr().unwrap_or(self.listen_addr);
         let mode = self.effective_mode();
+        #[cfg(target_os = "linux")]
+        let udp_socket = if mode == TransparentMode::TProxy {
+            Some(linux::bind_udp(bound_addr)?)
+        } else {
+            None
+        };
         let _firewall = if self.auto_route {
             let bypass_ips = collect_proxy_server_ips(&self.tunnel);
             Some(FirewallGuard::setup(
@@ -180,11 +188,15 @@ impl TProxyListener {
             );
         }
 
+        #[cfg(target_os = "linux")]
+        let udp_tunnel = self.tunnel.clone();
         let tunnel = self.tunnel;
         let sniffer = self.sniffer;
         let name = self.name;
         let max_connections = self.max_connections;
-        bounded_accept_loop(listener, max_connections, name.clone(), {
+        #[cfg(target_os = "linux")]
+        let udp_name = name.clone();
+        let tcp = bounded_accept_loop(listener, max_connections, name.clone(), {
             move |stream, src_addr| {
                 let tunnel = tunnel.clone();
                 let sniffer = sniffer.clone();
@@ -199,8 +211,15 @@ impl TProxyListener {
                     }
                 }
             }
-        })
-        .await
+        });
+        #[cfg(target_os = "linux")]
+        if let Some(socket) = udp_socket {
+            return tokio::select! {
+                result = tcp => result,
+                result = udp::run(udp_tunnel, socket, udp_name, self.routing_mark, max_connections) => result.map_err(Into::into),
+            };
+        }
+        tcp.await
     }
 }
 
@@ -333,6 +352,10 @@ async fn handle_tproxy_conn(
         TransparentMode::Redir => orig_dest::get_original_dst(&stream, listen_addr)?,
         TransparentMode::TProxy => stream.local_addr()?,
     };
+    // Dual-stack Linux listeners expose IPv4 peers as IPv4-mapped IPv6.
+    // Routing and local-address loop checks must see their canonical IPv4 form.
+    #[cfg(target_os = "linux")]
+    let (orig_dst, src_addr) = (linux::canonical(orig_dst), linux::canonical(src_addr));
 
     // Skip connections where original dest equals listen addr (self-connection)
     if orig_dst == listen_addr
@@ -340,6 +363,10 @@ async fn handle_tproxy_conn(
         || (orig_dst.port() == listen_addr.port() && orig_dst.ip().is_loopback())
     {
         return Err("original destination is the listen address (loop detected)".into());
+    }
+    #[cfg(target_os = "linux")]
+    if orig_dst.port() == listen_addr.port() && linux::is_local_address(orig_dst.ip())? {
+        return Err("original destination is a local listener address (loop detected)".into());
     }
 
     // Build initial metadata with IP-literal host for sniffer / DNS-snoop.
@@ -390,7 +417,7 @@ async fn handle_tproxy_conn(
     );
 
     let Some(_guard) = admission.track(
-        metadata.pure(),
+        metadata.clone(),
         rule_name,
         rule_payload,
         smallvec![Arc::from(proxy.name())],
