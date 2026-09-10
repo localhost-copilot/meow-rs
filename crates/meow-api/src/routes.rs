@@ -1651,9 +1651,10 @@ async fn get_group_delay(
         return msg_err(StatusCode::NOT_FOUND, "resource not found");
     };
     // upstream: findProxyByName rejects non-groups with 404 for this route.
-    let Some(member_names) = group.members() else {
+    let Some(members) = group.member_proxies() else {
         return msg_err(StatusCode::NOT_FOUND, "resource not found");
     };
+    drop(route);
 
     let timeout = match parse_delay_params(&params) {
         Ok(t) => t,
@@ -1670,18 +1671,14 @@ async fn get_group_delay(
     let url = params.url.as_deref().unwrap_or("").to_string();
     let expected = params.expected.clone();
 
-    // Resolve each member name to an `Arc<dyn Proxy>` *before* dropping the
-    // proxies map so the spawned tasks hold their own Arc clones.
-    let members = member_names
-        .into_iter()
-        .filter_map(|n| route.proxies.get(n.as_str()).cloned().map(|p| (n, p)));
-
     // GroupBase.URLTest keeps successful results when another member fails or
     // reaches the shared deadline. Queued probes cannot extend that deadline.
     use futures::StreamExt as _;
     let deadline = tokio::time::Instant::now() + timeout;
     let probes: Vec<_> = members
-        .map(|(name, proxy): (String, Arc<dyn meow_common::Proxy>)| {
+        .into_iter()
+        .map(|proxy: Arc<dyn meow_common::Proxy>| {
+            let name = proxy.name().to_owned();
             let url = &url;
             let expected = expected.as_deref();
             async move {
@@ -1703,7 +1700,6 @@ async fn get_group_delay(
             }
         })
         .collect();
-    drop(route);
     let mut probes =
         futures::stream::iter(probes).buffer_unordered(meow_proxy::health::GROUP_DELAY_CONCURRENCY);
     let mut result: BTreeMap<String, u16> = BTreeMap::new();
