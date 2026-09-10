@@ -238,7 +238,8 @@ impl Driver {
     ) -> io::Result<()> {
         let epoch = Instant::now();
         loop {
-            let now = SmolInstant::from_millis(epoch.elapsed().as_millis() as i64);
+            // CUBIC advances its recovery curve between sub-millisecond ACKs.
+            let now = SmolInstant::from_micros(epoch.elapsed().as_micros() as i64);
             self.iface.poll(now, &mut self.device, &mut self.sockets);
             let delay = if self.device.outgoing.len() >= 64 {
                 Duration::from_secs(1)
@@ -246,7 +247,7 @@ impl Driver {
                 self.iface
                     .poll_delay(now, &self.sockets)
                     .map_or(Duration::from_secs(1), |n| {
-                        Duration::from_millis(n.total_millis()).min(Duration::from_secs(1))
+                        Duration::from_micros(n.total_micros()).min(Duration::from_secs(1))
                     })
             };
             let wake = Arc::clone(&self.wake);
