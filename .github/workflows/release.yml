@@ -243,9 +243,20 @@ jobs:
           f="luci-app-meow_${version}-1_all.ipk"
           sha256sum "$f" > "$f.sha256"
 
+      - name: Select release notes
+        id: notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          notes="docs/releases/${RELEASE_TAG}.md"
+          if [ -f "$notes" ]; then
+            echo "path=$notes" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: ${{ steps.notes.outputs.path }}
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256
