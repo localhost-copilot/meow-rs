@@ -1,6 +1,38 @@
 use meow_config::{load_config_from_str, ListenerSpec};
 
 #[tokio::test]
+async fn startup_shares_rule_matchers_between_routing_and_provider_registry() {
+    let config = load_config_from_str(
+        r#"
+dns:
+  enable: true
+  nameserver: [127.0.0.1:5353]
+  nameserver-policy:
+    rule-set:domains: [127.0.0.1:5354]
+rule-providers:
+  domains:
+    type: inline
+    behavior: domain
+    payload: ["+.example.org"]
+rules:
+  - RULE-SET,domains,REJECT
+  - MATCH,DIRECT
+"#,
+    )
+    .await
+    .unwrap();
+    let rule = config.rules[0]
+        .as_any()
+        .unwrap()
+        .downcast_ref::<meow_rules::RuleSetRule>()
+        .unwrap();
+    let snapshot = config.rule_providers["domains"].snapshot();
+    assert!(std::sync::Arc::ptr_eq(rule.rule_set(), &snapshot));
+    assert!(snapshot.matches_domain("www.example.org"));
+    assert!(!snapshot.matches_domain("other.test"));
+}
+
+#[tokio::test]
 async fn openclash_transparent_ports_are_distinct_external_listeners() {
     let config = load_config_from_str(
         "allow-lan: true\nredir-port: 7892\ntproxy-port: 7895\ntproxy-auto-route: false\n",
