@@ -19,6 +19,7 @@ const PUBLISHABLE: &[&str] = &[
     "meow-lwip",
     "meow-transport",
     "meow-netstack",
+    "meow-smoltcp",
     "meow-openconnect",
     "meow-rules",
     "meow-dns",
