@@ -46,5 +46,15 @@ The nested `auto-update`, `auto-update-interval`, `url`, `geodata-mode`, and
 `geodata-loader` aliases remain accepted. Corresponding top-level values take
 precedence. `geoip-matcher` does not change meow's range-index implementation.
 
+Periodic refresh downloads the selected country database, ASN, and GeoSite.
+Successful downloads trigger a rebuild of rules and DNS classification,
+including GeoSite nameserver policies, GeoIP fallback filters, and policies
+shared by the dedicated DIRECT resolver. Cached DNS answers are cleared;
+fake-IP allocations and active proxy connections survive. A configuration
+change during the rebuild prevents stale rules from replacing the current ones.
+Failed rebuilds preserve the active classification and report an error.
+
 Parser tests cover both loaders, country membership, inverse ranges, malformed
 and truncated protobuf, URL/path selection, and interval validation.
+Runtime tests replace GeoSite data and verify changed routing and DNS answers
+without restarting, plus the periodic country-database download.
