@@ -26,6 +26,88 @@ use meow_transport::{
 use support::loopback::{gen_cert, install_crypto_provider, spawn_tls_server, ServerOptions};
 
 #[tokio::test]
+async fn handshake_waits_for_an_asynchronous_flush() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    struct PendingFlush {
+        inner: tokio::io::BufWriter<TcpStream>,
+        pending: bool,
+    }
+    impl AsyncRead for PendingFlush {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_read(cx, buf)
+        }
+    }
+    impl AsyncWrite for PendingFlush {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.pending = true;
+            Pin::new(&mut self.inner).poll_write(cx, buf)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if std::mem::take(&mut self.pending) {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Pin::new(&mut self.inner).poll_shutdown(cx)
+        }
+    }
+
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        install_crypto_provider();
+        let (cert, key, _, _) = gen_cert(&["localhost"]);
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.clone()], key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let mut tls = acceptor.accept(tcp).await.unwrap();
+            let mut data = [0; 14];
+            tls.read_exact(&mut data).await.unwrap();
+            tls.write_all(&data).await.unwrap();
+        });
+        let layer = TlsLayer::new(&TlsConfig {
+            additional_roots: vec![cert.to_vec()],
+            ..TlsConfig::new("localhost")
+        })
+        .unwrap();
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let mut tls = layer
+            .connect(Box::new(PendingFlush {
+                inner: tokio::io::BufWriter::new(tcp),
+                pending: false,
+            }))
+            .await
+            .unwrap();
+        tls.write_all(b"flush survived").await.unwrap();
+        tls.flush().await.unwrap();
+        let mut reply = [0; 14];
+        tls.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"flush survived");
+        server.await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn exporter_matches_independent_peer_and_is_connection_bound() {
     use meow_transport::tls::export_keying_material;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/boring"]
 members = [
     "crates/meow-common",
     "crates/meow-netstack",
@@ -25,6 +26,11 @@ strip = true
 codegen-units = 1
 panic = "abort"
 opt-level = "z"
+
+# Backport the upstream async BIO flush fix without changing the BoringSSL
+# version shared with quiche. See vendor/boring/MEOW-PATCHES.md.
+[patch.crates-io]
+boring = { path = "vendor/boring" }
 
 # OpenConnect's userspace packet path is sensitive to checksum and per-packet
 # dispatch costs; keep speed optimizations here while retaining the size policy
