@@ -875,24 +875,8 @@ async fn run(
         });
     }
 
-    // Fetch any missing geodata DBs on startup (unconditional — independent of
-    // geodata.auto-update). Runs in the background so listener startup is not
-    // blocked; rules are rebuilt afterward if anything was downloaded.
-    {
-        let geodata = config.geodata.clone();
-        let tunnel = tunnel.clone();
-        let providers = Arc::clone(&rule_providers);
-        let raw_config = Arc::clone(&raw_config);
-        let resolver = Arc::clone(&resolver);
-        let cache_dir = meow_config::resource_cache_dir_for_config_path(&config_path);
-        tokio::spawn(async move {
-            meow_app::geodata_fetch::run_on_startup(
-                geodata, tunnel, raw_config, resolver, cache_dir, providers,
-            )
-            .await;
-        });
-    }
-
+    // Config loading already fetched the databases referenced by rules and DNS.
+    // Do not start downloads of unused databases through freshly opened VPNs.
     // Spawn geodata auto-update task if enabled.
     if config.geodata.auto_update {
         let geodata = config.geodata.clone();
