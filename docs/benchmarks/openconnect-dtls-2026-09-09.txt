@@ -1,0 +1,553 @@
+# Final Rust 1.89-compatible implementation; full external processes; 2026-09-09
+BENCH_RUN,meow,8,1
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 6 0 0 6 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.160,0.214,0.241
+BENCH_LATENCY,off,tcp128,2,0.106,0.142,0.158
+BENCH_LATENCY,off,tcp128,3,0.123,0.143,0.151
+BENCH_TCP,off,1,1,8,144.637,55.311
+BENCH_TCP,off,1,2,8,148.931,53.716
+BENCH_TCP,off,1,3,8,142.137,56.284
+BENCH_TCP,off,4,1,32,476.322,67.181
+BENCH_TCP,off,4,2,32,469.150,68.209
+BENCH_TCP,off,4,3,32,468.380,68.321
+BENCH_LATENCY,off,udp128,1,0.141,0.161,0.173
+BENCH_LATENCY,off,udp128,2,0.142,0.155,0.166
+BENCH_LATENCY,off,udp128,3,0.142,0.157,0.167
+BENCH_UDP,off,16,1,8192,8192,190.022,49.336
+BENCH_UDP,off,16,2,8192,8192,194.769,48.134
+BENCH_UDP,off,16,3,8192,8192,217.903,43.024
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25483 0 0 25483 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 14 0 0 16 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.150,0.190,0.231
+BENCH_LATENCY,require,tcp128,2,0.105,0.130,0.140
+BENCH_LATENCY,require,tcp128,3,0.110,0.128,0.143
+BENCH_TCP,require,1,1,8,147.534,54.225
+BENCH_TCP,require,1,2,8,162.815,49.136
+BENCH_TCP,require,1,3,8,138.188,57.892
+BENCH_TCP,require,4,1,32,576.442,55.513
+BENCH_TCP,require,4,2,32,595.752,53.714
+BENCH_TCP,require,4,3,32,572.175,55.927
+BENCH_LATENCY,require,udp128,1,0.133,0.152,0.161
+BENCH_LATENCY,require,udp128,2,0.135,0.154,0.209
+BENCH_LATENCY,require,udp128,3,0.138,0.155,0.161
+BENCH_UDP,require,16,1,8192,8192,195.561,47.939
+BENCH_UDP,require,16,2,8192,8192,194.930,48.094
+BENCH_UDP,require,16,3,8192,8192,198.564,47.214
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 199515 0 0 185238 0 0 0 0 0
+BENCH_RUN,mihomo,8,1
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.111,0.133,0.142
+BENCH_LATENCY,off,tcp128,2,0.120,0.139,0.150
+BENCH_LATENCY,off,tcp128,3,0.118,0.134,0.139
+BENCH_TCP,off,1,1,8,164.293,48.693
+BENCH_TCP,off,1,2,8,191.063,41.871
+BENCH_TCP,off,1,3,8,155.755,51.363
+BENCH_TCP,off,4,1,32,449.669,71.163
+BENCH_TCP,off,4,2,32,850.903,37.607
+BENCH_TCP,off,4,3,32,912.795,35.057
+BENCH_LATENCY,off,udp128,1,0.539,0.875,1.596
+BENCH_LATENCY,off,udp128,2,0.174,0.353,0.555
+BENCH_LATENCY,off,udp128,3,0.153,0.173,0.228
+BENCH_UDP,off,16,1,8192,8192,235.381,39.829
+BENCH_UDP,off,16,2,8192,8192,242.533,38.654
+BENCH_UDP,off,16,3,8192,8192,246.598,38.017
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25477 0 0 25477 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.136,0.231,0.252
+BENCH_LATENCY,require,tcp128,2,0.110,0.131,0.168
+BENCH_LATENCY,require,tcp128,3,0.134,0.151,0.160
+BENCH_TCP,require,1,1,8,169.940,47.076
+BENCH_TCP,require,1,2,8,136.515,58.602
+BENCH_TCP,require,1,3,8,122.796,65.149
+BENCH_TCP,require,4,1,32,3410.186,9.384
+BENCH_TCP,require,4,2,32,922.677,34.682
+BENCH_TCP,require,4,3,32,2419.741,13.225
+BENCH_LATENCY,require,udp128,1,0.144,0.165,0.220
+BENCH_LATENCY,require,udp128,2,0.144,0.158,0.166
+BENCH_LATENCY,require,udp128,3,0.135,0.146,0.171
+BENCH_UDP,require,16,1,8192,8192,231.271,40.537
+BENCH_UDP,require,16,2,8192,8192,233.279,40.188
+BENCH_UDP,require,16,3,8192,8192,234.973,39.898
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 179212 0 466 173714 466 0 0 0 0
+BENCH_RUN,mihomo,8,2
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.153,0.210,0.251
+BENCH_LATENCY,off,tcp128,2,0.119,0.134,0.145
+BENCH_LATENCY,off,tcp128,3,0.140,0.163,0.179
+BENCH_TCP,off,1,1,8,363.851,21.987
+BENCH_TCP,off,1,2,8,587.338,13.621
+BENCH_TCP,off,1,3,8,146.599,54.571
+BENCH_TCP,off,4,1,32,910.849,35.132
+BENCH_TCP,off,4,2,32,906.258,35.310
+BENCH_TCP,off,4,3,32,924.041,34.631
+BENCH_LATENCY,off,udp128,1,0.368,0.730,0.999
+BENCH_LATENCY,off,udp128,2,0.148,0.166,0.175
+BENCH_LATENCY,off,udp128,3,0.153,0.167,0.172
+BENCH_UDP,off,16,1,8192,8192,222.908,42.058
+BENCH_UDP,off,16,2,8192,8192,237.831,39.419
+BENCH_UDP,off,16,3,8192,8192,228.719,40.989
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25477 0 0 25477 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.142,0.227,0.261
+BENCH_LATENCY,require,tcp128,2,0.112,0.126,0.143
+BENCH_LATENCY,require,tcp128,3,0.112,0.127,0.139
+BENCH_TCP,require,1,1,8,153.976,51.956
+BENCH_TCP,require,1,2,8,570.571,14.021
+BENCH_TCP,require,1,3,8,172.009,46.509
+BENCH_TCP,require,4,1,32,1712.966,18.681
+BENCH_TCP,require,4,2,32,4749.108,6.738
+BENCH_TCP,require,4,3,32,468.727,68.270
+BENCH_LATENCY,require,udp128,1,0.143,0.157,0.168
+BENCH_LATENCY,require,udp128,2,0.138,0.156,0.166
+BENCH_LATENCY,require,udp128,3,0.135,0.146,0.156
+BENCH_UDP,require,16,1,8192,8192,230.149,40.734
+BENCH_UDP,require,16,2,8192,8192,225.567,41.562
+BENCH_UDP,require,16,3,8192,8192,230.304,40.707
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 179472 0 481 175248 481 0 0 0 0
+BENCH_RUN,meow,8,2
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 6 0 0 6 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.127,0.229,0.347
+BENCH_LATENCY,off,tcp128,2,0.103,0.119,0.129
+BENCH_LATENCY,off,tcp128,3,0.102,0.114,0.122
+BENCH_TCP,off,1,1,8,168.439,47.495
+BENCH_TCP,off,1,2,8,132.708,60.283
+BENCH_TCP,off,1,3,8,142.524,56.131
+BENCH_TCP,off,4,1,32,473.822,67.536
+BENCH_TCP,off,4,2,32,456.635,70.078
+BENCH_TCP,off,4,3,32,471.612,67.852
+BENCH_LATENCY,off,udp128,1,0.147,0.163,0.168
+BENCH_LATENCY,off,udp128,2,0.149,0.162,0.174
+BENCH_LATENCY,off,udp128,3,0.140,0.155,0.162
+BENCH_UDP,off,16,1,8192,8192,199.810,46.920
+BENCH_UDP,off,16,2,8192,8192,183.079,51.207
+BENCH_UDP,off,16,3,8192,8192,182.740,51.302
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25483 0 0 25483 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 14 0 0 17 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.116,0.198,0.246
+BENCH_LATENCY,require,tcp128,2,0.099,0.113,0.127
+BENCH_LATENCY,require,tcp128,3,0.099,0.123,0.135
+BENCH_TCP,require,1,1,8,152.741,52.376
+BENCH_TCP,require,1,2,8,153.443,52.136
+BENCH_TCP,require,1,3,8,154.975,51.621
+BENCH_TCP,require,4,1,32,599.177,53.407
+BENCH_TCP,require,4,2,32,584.660,54.733
+BENCH_TCP,require,4,3,32,583.734,54.820
+BENCH_LATENCY,require,udp128,1,0.128,0.142,0.155
+BENCH_LATENCY,require,udp128,2,0.130,0.148,0.167
+BENCH_LATENCY,require,udp128,3,0.132,0.145,0.151
+BENCH_UDP,require,16,1,8192,8192,197.492,47.470
+BENCH_UDP,require,16,2,8192,8192,192.900,48.600
+BENCH_UDP,require,16,3,8192,8192,191.429,48.974
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 198657 0 0 186287 0 0 0 0 0
+BENCH_RUN,meow,8,3
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 6 0 0 6 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.144,0.187,0.204
+BENCH_LATENCY,off,tcp128,2,0.102,0.118,0.134
+BENCH_LATENCY,off,tcp128,3,0.109,0.133,0.144
+BENCH_TCP,off,1,1,8,174.363,45.881
+BENCH_TCP,off,1,2,8,163.618,48.894
+BENCH_TCP,off,1,3,8,157.679,50.736
+BENCH_TCP,off,4,1,32,478.162,66.923
+BENCH_TCP,off,4,2,32,478.415,66.887
+BENCH_TCP,off,4,3,32,458.840,69.741
+BENCH_LATENCY,off,udp128,1,0.135,0.151,0.163
+BENCH_LATENCY,off,udp128,2,0.145,0.160,0.178
+BENCH_LATENCY,off,udp128,3,0.146,0.160,0.166
+BENCH_UDP,off,16,1,8192,8192,190.307,49.262
+BENCH_UDP,off,16,2,8192,8192,194.691,48.153
+BENCH_UDP,off,16,3,8192,8192,196.513,47.707
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25483 0 0 25483 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 14 0 0 16 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.151,0.194,0.208
+BENCH_LATENCY,require,tcp128,2,0.107,0.123,0.133
+BENCH_LATENCY,require,tcp128,3,0.099,0.114,0.122
+BENCH_TCP,require,1,1,8,159.000,50.314
+BENCH_TCP,require,1,2,8,142.225,56.249
+BENCH_TCP,require,1,3,8,145.027,55.162
+BENCH_TCP,require,4,1,32,599.403,53.386
+BENCH_TCP,require,4,2,32,576.781,55.480
+BENCH_TCP,require,4,3,32,589.066,54.323
+BENCH_LATENCY,require,udp128,1,0.139,0.152,0.159
+BENCH_LATENCY,require,udp128,2,0.139,0.154,0.163
+BENCH_LATENCY,require,udp128,3,0.138,0.150,0.160
+BENCH_UDP,require,16,1,8192,8192,187.334,50.044
+BENCH_UDP,require,16,2,8192,8192,196.252,47.770
+BENCH_UDP,require,16,3,8192,8192,197.759,47.406
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 200114 0 0 186235 0 0 0 0 0
+BENCH_RUN,mihomo,8,3
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.152,0.202,0.217
+BENCH_LATENCY,off,tcp128,2,0.119,0.138,0.149
+BENCH_LATENCY,off,tcp128,3,0.118,0.136,0.152
+BENCH_TCP,off,1,1,8,168.713,47.418
+BENCH_TCP,off,1,2,8,157.492,50.796
+BENCH_TCP,off,1,3,8,146.759,54.511
+BENCH_TCP,off,4,1,32,1043.893,30.654
+BENCH_TCP,off,4,2,32,674.480,47.444
+BENCH_TCP,off,4,3,32,402.341,79.535
+BENCH_LATENCY,off,udp128,1,0.155,0.176,0.204
+BENCH_LATENCY,off,udp128,2,0.143,0.164,0.218
+BENCH_LATENCY,off,udp128,3,0.150,0.171,0.187
+BENCH_UDP,off,16,1,8192,8192,240.268,39.019
+BENCH_UDP,off,16,2,8192,8192,231.189,40.551
+BENCH_UDP,off,16,3,8192,8192,250.007,37.499
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25477 0 0 25477 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.153,0.221,0.272
+BENCH_LATENCY,require,tcp128,2,0.112,0.138,0.150
+BENCH_LATENCY,require,tcp128,3,0.135,0.151,0.160
+BENCH_TCP,require,1,1,8,152.145,52.581
+BENCH_TCP,require,1,2,8,143.780,55.641
+BENCH_TCP,require,1,3,8,133.167,60.075
+BENCH_TCP,require,4,1,32,1773.377,18.045
+BENCH_TCP,require,4,2,32,503.003,63.618
+BENCH_TCP,require,4,3,32,2810.660,11.385
+BENCH_LATENCY,require,udp128,1,0.145,0.162,0.172
+BENCH_LATENCY,require,udp128,2,0.137,0.155,0.205
+BENCH_LATENCY,require,udp128,3,0.148,0.158,0.167
+BENCH_UDP,require,16,1,8192,8192,226.028,41.477
+BENCH_UDP,require,16,2,8192,8192,230.006,40.760
+BENCH_UDP,require,16,3,8192,8192,227.703,41.172
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 179981 0 283 174765 283 0 0 0 0
+BENCH_RUN,meow,64,1
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 6 0 0 6 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.149,0.190,0.208
+BENCH_LATENCY,off,tcp128,2,0.103,0.120,0.148
+BENCH_LATENCY,off,tcp128,3,0.102,0.114,0.125
+BENCH_TCP,off,1,1,64,1044.799,61.256
+BENCH_TCP,off,1,2,64,973.660,65.731
+BENCH_TCP,off,1,3,64,929.671,68.842
+BENCH_TCP,off,4,1,256,3484.756,73.463
+BENCH_TCP,off,4,2,256,3476.167,73.644
+BENCH_TCP,off,4,3,256,3448.334,74.239
+BENCH_LATENCY,off,udp128,1,0.138,0.157,0.169
+BENCH_LATENCY,off,udp128,2,0.144,0.159,0.182
+BENCH_LATENCY,off,udp128,3,0.148,0.161,0.174
+BENCH_UDP,off,16,1,8192,8192,209.133,44.828
+BENCH_UDP,off,16,2,8192,8192,203.029,46.176
+BENCH_UDP,off,16,3,8192,8192,200.421,46.776
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25483 0 0 25483 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 14 0 0 20 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.125,0.208,0.232
+BENCH_LATENCY,require,tcp128,2,0.102,0.122,0.139
+BENCH_LATENCY,require,tcp128,3,0.101,0.127,0.133
+BENCH_TCP,require,1,1,64,1055.998,60.606
+BENCH_TCP,require,1,2,64,1062.382,60.242
+BENCH_TCP,require,1,3,64,1037.366,61.695
+BENCH_TCP,require,4,1,256,4678.435,54.719
+BENCH_TCP,require,4,2,256,4610.514,55.525
+BENCH_TCP,require,4,3,256,4611.190,55.517
+BENCH_LATENCY,require,udp128,1,0.128,0.142,0.150
+BENCH_LATENCY,require,udp128,2,0.142,0.157,0.162
+BENCH_LATENCY,require,udp128,3,0.141,0.152,0.171
+BENCH_UDP,require,16,1,8192,8192,195.630,47.922
+BENCH_UDP,require,16,2,8192,8192,195.073,48.059
+BENCH_UDP,require,16,3,8192,8192,196.204,47.782
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1241080 0 0 1096455 0 0 0 0 0
+BENCH_RUN,mihomo,64,1
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.122,0.150,0.182
+BENCH_LATENCY,off,tcp128,2,0.119,0.135,0.160
+BENCH_LATENCY,off,tcp128,3,0.118,0.138,0.152
+BENCH_TCP,off,1,1,64,1369.181,46.743
+BENCH_TCP,off,1,2,64,1210.514,52.870
+BENCH_TCP,off,1,3,64,758.841,84.339
+BENCH_TCP,off,4,1,256,3703.722,69.120
+BENCH_TCP,off,4,2,256,3915.294,65.385
+BENCH_TCP,off,4,3,256,3893.416,65.752
+BENCH_LATENCY,off,udp128,1,0.203,0.447,0.887
+BENCH_LATENCY,off,udp128,2,0.151,0.166,0.173
+BENCH_LATENCY,off,udp128,3,0.153,0.169,0.275
+BENCH_UDP,off,16,1,8192,8192,239.890,39.080
+BENCH_UDP,off,16,2,8192,8192,235.122,39.873
+BENCH_UDP,off,16,3,8192,8192,243.830,38.449
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25477 0 0 25477 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.119,0.205,0.247
+BENCH_LATENCY,require,tcp128,2,0.112,0.127,0.156
+BENCH_LATENCY,require,tcp128,3,0.135,0.152,0.164
+BENCH_TCP,require,1,1,64,977.276,65.488
+BENCH_TCP,require,1,2,64,1036.765,61.730
+BENCH_TCP,require,1,3,64,960.413,66.638
+BENCH_TCP,require,4,1,256,3871.891,66.118
+BENCH_TCP,require,4,2,256,4501.525,56.870
+BENCH_TCP,require,4,3,256,4463.819,57.350
+BENCH_LATENCY,require,udp128,1,0.144,0.165,0.233
+BENCH_LATENCY,require,udp128,2,0.135,0.149,0.213
+BENCH_LATENCY,require,udp128,3,0.135,0.148,0.153
+BENCH_UDP,require,16,1,8192,8192,233.664,40.122
+BENCH_UDP,require,16,2,8192,8192,234.375,40.000
+BENCH_UDP,require,16,3,8192,8192,257.167,36.455
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1063262 0 542 1024163 542 0 0 0 0
+BENCH_RUN,mihomo,64,2
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.152,0.206,0.232
+BENCH_LATENCY,off,tcp128,2,0.119,0.133,0.145
+BENCH_LATENCY,off,tcp128,3,0.117,0.133,0.147
+BENCH_TCP,off,1,1,64,906.918,70.569
+BENCH_TCP,off,1,2,64,1497.765,42.730
+BENCH_TCP,off,1,3,64,1195.574,53.531
+BENCH_TCP,off,4,1,256,3794.396,67.468
+BENCH_TCP,off,4,2,256,3344.677,76.540
+BENCH_TCP,off,4,3,256,3880.206,65.976
+BENCH_LATENCY,off,udp128,1,0.260,0.493,0.804
+BENCH_LATENCY,off,udp128,2,0.154,0.173,0.179
+BENCH_LATENCY,off,udp128,3,0.154,0.167,0.183
+BENCH_UDP,off,16,1,8192,8192,237.310,39.505
+BENCH_UDP,off,16,2,8192,8192,231.870,40.432
+BENCH_UDP,off,16,3,8192,8192,225.647,41.547
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25477 0 0 25477 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.146,0.203,0.237
+BENCH_LATENCY,require,tcp128,2,0.112,0.131,0.198
+BENCH_LATENCY,require,tcp128,3,0.111,0.123,0.135
+BENCH_TCP,require,1,1,64,1058.132,60.484
+BENCH_TCP,require,1,2,64,957.430,66.846
+BENCH_TCP,require,1,3,64,949.212,67.424
+BENCH_TCP,require,4,1,256,4949.198,51.726
+BENCH_TCP,require,4,2,256,4189.861,61.100
+BENCH_TCP,require,4,3,256,3861.554,66.295
+BENCH_LATENCY,require,udp128,1,0.153,0.171,0.185
+BENCH_LATENCY,require,udp128,2,0.151,0.164,0.218
+BENCH_LATENCY,require,udp128,3,0.142,0.158,0.166
+BENCH_UDP,require,16,1,8192,8192,230.277,40.712
+BENCH_UDP,require,16,2,8192,8192,235.925,39.737
+BENCH_UDP,require,16,3,8192,8192,235.276,39.847
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1062235 0 547 1020737 547 0 0 0 0
+BENCH_RUN,meow,64,2
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 6 0 0 6 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.149,0.195,0.228
+BENCH_LATENCY,off,tcp128,2,0.105,0.125,0.138
+BENCH_LATENCY,off,tcp128,3,0.124,0.137,0.144
+BENCH_TCP,off,1,1,64,1048.469,61.041
+BENCH_TCP,off,1,2,64,882.046,72.559
+BENCH_TCP,off,1,3,64,975.961,65.576
+BENCH_TCP,off,4,1,256,3440.748,74.402
+BENCH_TCP,off,4,2,256,3487.244,73.410
+BENCH_TCP,off,4,3,256,3447.262,74.262
+BENCH_LATENCY,off,udp128,1,0.148,0.166,0.176
+BENCH_LATENCY,off,udp128,2,0.144,0.157,0.161
+BENCH_LATENCY,off,udp128,3,0.144,0.156,0.164
+BENCH_UDP,off,16,1,8192,8192,183.734,51.025
+BENCH_UDP,off,16,2,8192,8192,195.775,47.887
+BENCH_UDP,off,16,3,8192,8192,203.155,46.147
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25483 0 0 25483 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 14 0 0 16 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.150,0.191,0.218
+BENCH_LATENCY,require,tcp128,2,0.099,0.112,0.122
+BENCH_LATENCY,require,tcp128,3,0.114,0.144,0.181
+BENCH_TCP,require,1,1,64,1085.289,58.970
+BENCH_TCP,require,1,2,64,1057.836,60.501
+BENCH_TCP,require,1,3,64,1062.283,60.248
+BENCH_TCP,require,4,1,256,4680.445,54.696
+BENCH_TCP,require,4,2,256,4573.878,55.970
+BENCH_TCP,require,4,3,256,4656.296,54.979
+BENCH_LATENCY,require,udp128,1,0.141,0.154,0.163
+BENCH_LATENCY,require,udp128,2,0.139,0.153,0.160
+BENCH_LATENCY,require,udp128,3,0.140,0.156,0.255
+BENCH_UDP,require,16,1,8192,8192,191.045,49.072
+BENCH_UDP,require,16,2,8192,8192,194.991,48.079
+BENCH_UDP,require,16,3,8192,8192,195.566,47.938
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1236752 0 0 1092432 0 0 0 0 0
+BENCH_RUN,meow,64,3
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 6 0 0 6 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.148,0.199,0.212
+BENCH_LATENCY,off,tcp128,2,0.121,0.135,0.141
+BENCH_LATENCY,off,tcp128,3,0.125,0.138,0.145
+BENCH_TCP,off,1,1,64,1116.205,57.337
+BENCH_TCP,off,1,2,64,881.943,72.567
+BENCH_TCP,off,1,3,64,1004.337,63.724
+BENCH_TCP,off,4,1,256,3513.815,72.855
+BENCH_TCP,off,4,2,256,3435.554,74.515
+BENCH_TCP,off,4,3,256,3411.897,75.032
+BENCH_LATENCY,off,udp128,1,0.142,0.157,0.164
+BENCH_LATENCY,off,udp128,2,0.142,0.158,0.168
+BENCH_LATENCY,off,udp128,3,0.148,0.162,0.172
+BENCH_UDP,off,16,1,8192,8192,204.811,45.774
+BENCH_UDP,off,16,2,8192,8192,190.997,49.085
+BENCH_UDP,off,16,3,8192,8192,195.906,47.855
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25483 0 0 25483 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 14 0 0 19 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.144,0.203,0.263
+BENCH_LATENCY,require,tcp128,2,0.102,0.130,0.143
+BENCH_LATENCY,require,tcp128,3,0.122,0.136,0.145
+BENCH_TCP,require,1,1,64,1154.088,55.455
+BENCH_TCP,require,1,2,64,1028.671,62.216
+BENCH_TCP,require,1,3,64,1060.003,60.377
+BENCH_TCP,require,4,1,256,4700.826,54.459
+BENCH_TCP,require,4,2,256,4648.572,55.071
+BENCH_TCP,require,4,3,256,4677.455,54.731
+BENCH_LATENCY,require,udp128,1,0.140,0.157,0.176
+BENCH_LATENCY,require,udp128,2,0.141,0.155,0.165
+BENCH_LATENCY,require,udp128,3,0.140,0.154,0.167
+BENCH_UDP,require,16,1,8192,8192,194.099,48.300
+BENCH_UDP,require,16,2,8192,8192,199.094,47.088
+BENCH_UDP,require,16,3,8192,8192,196.680,47.666
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1246602 0 0 1111634 0 0 0 0 0
+BENCH_RUN,mihomo,64,3
+BENCH_SERVER_UDP,off,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,off,tcp128,1,0.141,0.211,0.266
+BENCH_LATENCY,off,tcp128,2,0.120,0.135,0.151
+BENCH_LATENCY,off,tcp128,3,0.121,0.143,0.152
+BENCH_TCP,off,1,1,64,1493.261,42.859
+BENCH_TCP,off,1,2,64,1091.804,58.619
+BENCH_TCP,off,1,3,64,942.221,67.925
+BENCH_TCP,off,4,1,256,3752.979,68.212
+BENCH_TCP,off,4,2,256,3536.808,72.382
+BENCH_TCP,off,4,3,256,3687.930,69.416
+BENCH_LATENCY,off,udp128,1,0.178,0.297,0.337
+BENCH_LATENCY,off,udp128,2,0.154,0.168,0.182
+BENCH_LATENCY,off,udp128,3,0.157,0.172,0.216
+BENCH_UDP,off,16,1,8192,8192,232.935,40.247
+BENCH_UDP,off,16,2,8192,8192,220.455,42.526
+BENCH_UDP,off,16,3,8192,8192,232.165,40.381
+BENCH_NEGOTIATED,off,MTU,1372
+BENCH_NEGOTIATED,off,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25477 0 0 25477 0 0 0 0 0
+BENCH_SERVER_UDP,require,before,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,before,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_LATENCY,require,tcp128,1,0.119,0.195,0.255
+BENCH_LATENCY,require,tcp128,2,0.113,0.131,0.168
+BENCH_LATENCY,require,tcp128,3,0.113,0.127,0.136
+BENCH_TCP,require,1,1,64,1034.176,61.885
+BENCH_TCP,require,1,2,64,1003.707,63.764
+BENCH_TCP,require,1,3,64,980.592,65.267
+BENCH_TCP,require,4,1,256,4666.714,54.857
+BENCH_TCP,require,4,2,256,4236.690,60.425
+BENCH_TCP,require,4,3,256,3661.729,69.912
+BENCH_LATENCY,require,udp128,1,0.145,0.161,0.232
+BENCH_LATENCY,require,udp128,2,0.149,0.162,0.176
+BENCH_LATENCY,require,udp128,3,0.149,0.186,0.214
+BENCH_UDP,require,16,1,8192,8192,248.401,37.741
+BENCH_UDP,require,16,2,8192,8192,232.471,40.328
+BENCH_UDP,require,16,3,8192,8192,234.225,40.026
+BENCH_NEGOTIATED,require,MTU,1334
+BENCH_NEGOTIATED,require,TLS ciphersuite,(TLS1.3)-(ECDHE-SECP256R1)-(ECDSA-SECP256R1-SHA256)-(AES-128-GC
+BENCH_NEGOTIATED,require,DTLS cipher,(DTLS1.2)-(PSK)-(AES-128-GCM)
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1054248 0 359 1010005 359 0 0 0 0

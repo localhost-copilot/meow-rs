@@ -1,0 +1,31 @@
+[package]
+name = "meow-openconnect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "AnyConnect authentication and CSTP packet transport for meow-rs."
+
+[features]
+dtls = ["dep:libloading", "dep:libc", "dep:zeroize", "dep:tracing", "dep:openssl-src"]
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+roxmltree = "0.21.1"
+libloading = { version = "=0.8.9", optional = true }
+libc = { version = "0.2", optional = true }
+zeroize = { version = "1", optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[build-dependencies]
+# Only linked on Linux/musl. No runtime DSO or external provider modules.
+openssl-src = { version = "=300.6.1", features = ["no-dso"], optional = true }
+
+[lints]
+workspace = true

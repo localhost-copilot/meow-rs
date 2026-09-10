@@ -127,21 +127,16 @@ pub async fn handle_udp(
     // snooping-cache hostname fill-in).
     tunnel.pre_handle_metadata(&mut metadata);
 
-    // Pre-resolve metadata (host -> real IP if rules need it). UDP keeps
-    // the eager pre_resolve + resolve_proxy pair (no lazy enrichment): the
-    // NAT session key below requires a resolved dst_ip regardless of what
-    // the rules demand.
-    tunnel.pre_resolve(&mut metadata).await;
-
-    // Rule-demand gating is only an optimization. UDP still requires a real
-    // address for its NAT key and outbound packet API, including after a
-    // fake-IP was rewritten back to a hostname under domain-only rules.
-    if metadata.dst_ip.is_none() && !metadata.host.is_empty() {
-        metadata.dst_ip = tunnel.resolver.resolve_ip_real(&metadata.host).await;
-    }
+    let resolved_route = match tunnel.resolve_udp_host(&mut metadata).await {
+        Ok(route) => route,
+        Err(error) => {
+            debug!(%error, "UDP destination resolution failed");
+            return;
+        }
+    };
 
     // Build destination SocketAddr for the NAT key.
-    // pre_resolve() populates dst_ip for any hostname; if it is still None
+    // resolve_udp_host() populates dst_ip for a hostname; if it is still None
     // after that (resolution failure or unresolvable host), we cannot track
     // the session and must discard the packet.
     let Some(dst_ip) = metadata.dst_ip else {
@@ -190,7 +185,9 @@ pub async fn handle_udp(
     }
 
     // Slow path: all client UDP, including port 53, follows routing policy.
-    let Some((proxy, rule_name, rule_payload)) = tunnel.resolve_proxy(&metadata) else {
+    let Some((proxy, rule_name, rule_payload)) =
+        resolved_route.or_else(|| tunnel.resolve_proxy(&metadata))
+    else {
         warn!("no matching rule for UDP {}", metadata.remote_address());
         return;
     };

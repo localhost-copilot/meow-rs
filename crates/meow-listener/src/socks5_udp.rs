@@ -7,8 +7,8 @@
 //! which point this future returns and every per-destination outbound conn +
 //! reply task is dropped).
 //!
-//! Routing mirrors `meow_tunnel::udp::handle_udp`: fake-IP rewrite → pre-resolve
-//! → rule match → `dial_udp`. A small per-association
+//! Routing mirrors `meow_tunnel::udp::handle_udp`: fake-IP rewrite → rule match
+//! → outbound-owned or local hostname resolution → `dial_udp`. A small per-association
 //! NAT (`dst -> session`) dedups outbound conns; each session has a reply task
 //! that reads server→client datagrams and writes them back wrapped in the
 //! SOCKS5 UDP header.
@@ -178,13 +178,10 @@ async fn handle_client_datagram(
 
     let inner = tunnel.inner();
     inner.pre_handle_metadata(&mut metadata);
-    // UDP keeps the eager pre_resolve (no lazy enrichment): the relay needs
-    // a resolved dst_ip for its session bookkeeping regardless of what the
-    // rules demand.
-    inner.pre_resolve(&mut metadata).await;
-    if metadata.dst_ip.is_none() && !metadata.host.is_empty() {
-        metadata.dst_ip = inner.resolver.resolve_ip_real(&metadata.host).await;
-    }
+    let resolved_route = inner
+        .resolve_udp_host(&mut metadata)
+        .await
+        .map_err(|error| error.to_string())?;
 
     let Some(dst_ip) = metadata.dst_ip else {
         return Err(format!(
@@ -196,12 +193,19 @@ async fn handle_client_datagram(
     let payload = &datagram[data_off..];
 
     // Fast path: existing session for this destination.
+    if nat
+        .get(&dst_addr)
+        .is_some_and(|session| session.reply_task.is_finished())
+    {
+        nat.remove(&dst_addr);
+    }
     if let Some(session) = nat.get(&dst_addr) {
-        session
-            .conn
-            .write_packet(payload, &dst_addr)
-            .await
-            .map_err(|e| format!("udp write {dst_addr}: {e}"))?;
+        let result = session.conn.write_packet(payload, &dst_addr).await;
+        if let Err(error) = result {
+            nat.remove(&dst_addr);
+            // Do not retry this datagram: the old transport may have sent it.
+            return Err(format!("udp write {dst_addr}: {error}"));
+        }
         session.last_activity_ms.store(
             monotonic_ms() as meow_common::atomic::Uint,
             Ordering::Relaxed,
@@ -210,7 +214,8 @@ async fn handle_client_datagram(
     }
 
     // Client UDP follows the configured routing policy, including port 53.
-    let Some((proxy, _rule, _payload)) = inner.resolve_proxy(&metadata) else {
+    let Some((proxy, _rule, _payload)) = resolved_route.or_else(|| inner.resolve_proxy(&metadata))
+    else {
         return Err(format!(
             "no matching rule for {}",
             metadata.remote_address()
