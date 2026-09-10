@@ -72,7 +72,7 @@ Query parameters:
 |-----------|------|:-------:|-------------|
 | `url`     | string | yes (see note) | Target URL to probe. Typical values: `http://www.gstatic.com/generate_204`, `http://cp.cloudflare.com/generate_204`. |
 | `timeout` | integer (ms) | yes | Hard cap on the probe. **Range 1–65535**: out of range → 400. (Upstream parses it as `int16`, so we match that ceiling.) |
-| `expected` | string | no | Comma-separated HTTP status ranges the probe treats as success (e.g. `200,204-206`). Passed through to the probe. If omitted, any 2xx is success. Matches upstream. |
+| `expected` | string | no | Comma-separated HTTP status ranges the probe treats as success (e.g. `200,204-206`). Passed through to the probe. If omitted or empty, any completed HTTP response is success, matching mihomo's `Proxy.URLTest`. |
 
 > **Note on `url`**: upstream does not strictly validate `url` — it passes
 > whatever it gets to the prober. We additionally reject a missing `url`
