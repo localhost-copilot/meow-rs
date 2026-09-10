@@ -71,13 +71,13 @@ Implemented scope:
 - VLESS outbound.
 - `tls: true` with `reality-opts`.
 - TCP path for `flow: xtls-rprx-vision`.
+- UDP over XUDP with the configured Vision flow (added during YAML parity work).
 - Default curl HTTPS smoke test, which should negotiate HTTP/2.
 - `curl --http1.1` HTTPS smoke test as a comparison case.
 
 Out of scope:
 
 - VLESS inbound / server mode.
-- Vision UDP splice. UDP still uses plain VLESS and logs a config warning.
 - Hybrid `support-x25519mlkem768` key share. The config field is retained, but
   the current ClientHello only sends X25519.
 - Mux.Cool.

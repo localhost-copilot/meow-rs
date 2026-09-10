@@ -2,7 +2,7 @@
 
 Status: **draft** — owner: qa. Last updated: 2026-04-11.
 Tracks: task #40. Companion to `docs/specs/proxy-vless.md` (architect-approved,
-amendments applied: UDP+Vision warn row #7, peek-length fix to 5 bytes,
+amendments applied: XUDP + Vision UDP parity, peek-length fix to 5 bytes,
 padding range pinned to upstream constant).
 
 This is the QA-owned acceptance test plan. The spec's `§Test plan` section
@@ -112,7 +112,7 @@ must be bounced back to engineer.
 | C7 | `vision_reads_full_clienthello_before_sending` | Stage a ClientHello arriving in two `poll_read` chunks (first 5 bytes, then remainder). Assert `VisionConn` does not emit any bytes to the underlying writer until the full record (`5 + body_length` bytes) is buffered. <br/> Upstream: `transport/vless/vision/vision.go::ReadClientHelloRecord`. <br/> NOT partial-send on the first chunk — sending a truncated ClientHello to the server breaks the inner TLS handshake with no diagnostic. |
 | C8 | `vision_clienthello_body_length_from_bytes_3_4` **[guard-rail]** | Feed a ClientHello where `uint16_BE(bytes[3..5]) = 512`. Assert `VisionConn` issues a second `read_exact(512)` to buffer the body. Guards against an off-by-one that reads `bytes[4..6]` or miscounts the header-vs-body boundary. |
 | C9 | `vision_sends_padding_then_clienthello_in_order` | Assert that after Vision mode is entered, the bytes written to the underlying stream are in order: padding header bytes, then ClientHello bytes. Not interleaved, not reversed. |
-| C10 | `vision_udp_path_uses_plain_conn` **[guard-rail]** | Confirm that `VlessAdapter::dial_udp` when `flow = Some(XtlsRprxVision)` returns a plain `VlessConn` (not `VisionConn`). Assert no padding header is ever written on the UDP path. Guards against accidentally wrapping UDP in Vision. |
+| C10 | XUDP framing and cancellation | New/Keep packets retain destinations, control frames are skipped, cancelled reads resume, and truncated output does not corrupt the next datagram. |
 | C11 | `vision_no_inner_tls_no_log_noise` **[guard-rail]** | Feed non-TLS data in pass-through mode. Assert no `warn!` or `error!` is emitted — only a `trace!` at most. Vision's pass-through is the expected path for HTTP-over-VLESS; it must not spam logs. |
 
 ### D. Config parser unit tests (`crates/meow-config/src/proxy_parser.rs`)
@@ -140,7 +140,7 @@ otherwise `#[test]`.
 | D14 | `parse_vless_encryption_non_none_hard_errors` | `encryption: "aes-128-gcm"` → hard error. <br/> Upstream: also hard-errors on non-"none" values. Match (not a divergence — both reject). |
 | D15 | `parse_vless_encryption_empty_string_accepted` | `encryption: ""` → parses OK (equivalent to `"none"` per spec). |
 | D16 | `parse_vless_mux_enabled_warns_and_ignores` | `mux: { enabled: true }` → parse succeeds; tracing capture has one `warn!` containing `"mux"`. Class B per ADR-0002. |
-| D17 | `parse_vless_vision_udp_true_warns_once` | `flow: "xtls-rprx-vision"`, `udp: true`, `tls: true` → parse succeeds; tracing capture has one `warn!` containing `"UDP"` and `"Vision"` (or `"udp"` and `"vision"`). Class B per ADR-0002 row #7. |
+| D17 | `vless_yaml_defaults_to_xudp_with_per_packet_destinations` | YAML parsing through adapter dial emits CommandMux and independent per-packet destinations; replies round-trip. |
 | D18 | `parse_vless_uuid_hex_and_dashed_both_accepted` **[guard-rail]** | UUID in dashed form and hex-only form both parse to the same 16-byte value. |
 | D19 | `parse_vless_uuid_invalid_hard_errors` **[guard-rail]** | `uuid: "not-a-uuid"` → hard error with message containing `"uuid"`. |
 | D20 | `parse_vless_server_domain_over_255_errors` **[guard-rail]** | `server:` is a 256-char hostname → hard error at build time (not send time). Class A: wrong destination, no diagnostic on silent truncate. |
@@ -158,7 +158,7 @@ the resulting `TransportChain` shape; no network required.
 | E3 | `vless_ws_with_tls_chain_ordered` | `network: ws`, `tls: true`. Chain = `[TlsLayer, WsLayer]` in that order. TLS wraps TCP; WS wraps TLS. |
 | E4 | `vless_grpc_transport_chain` **[guard-rail]** | `network: grpc` (implies TLS). Chain includes `GrpcLayer`. Only when `grpc` feature enabled. |
 | E5 | `vless_vision_wrapped_around_vless_conn` | `flow: "xtls-rprx-vision"`, `tls: true`, `network: tcp`. `dial_tcp` returns a `VisionConn` wrapper, not a bare `VlessConn`. The Vision wrapping is inside the ProxyConn, orthogonal to the `TransportChain`. |
-| E6 | `vless_udp_ignores_vision_flow` **[guard-rail]** | `flow: "xtls-rprx-vision"`, `udp: true`, `tls: true`. `dial_udp` returns a plain `VlessConn` (no `VisionConn` wrapper). Acceptance criterion §Scope: "Vision is TCP-only". |
+| E6 | Real Vision UDP smoke | With `flow: xtls-rprx-vision`, a SOCKS5 UDP ASSOCIATE DNS query succeeds through the same node as mihomo. Opt-in; credentials remain outside the repository. |
 
 ### F. Connection wire tests (`crates/meow-proxy/src/vless/conn.rs`)
 
