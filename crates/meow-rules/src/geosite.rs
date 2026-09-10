@@ -316,10 +316,15 @@ fn geosite_config_dir() -> PathBuf {
 /// are present, since it parses ~10× faster and has no per-entry type
 /// fidelity loss.
 pub fn default_geosite_candidates() -> Vec<PathBuf> {
-    let cfg = geosite_config_dir();
+    geosite_candidates_in(&geosite_config_dir())
+}
+
+fn geosite_candidates_in(cfg: &Path) -> Vec<PathBuf> {
     vec![
         cfg.join("geosite.mrs"),
         cfg.join("geosite.dat"),
+        // OpenClash stores the same protobuf database under this name.
+        cfg.join("GeoSite.dat"),
         PathBuf::from("./meow/geosite.mrs"),
         PathBuf::from("./meow/geosite.dat"),
     ]
@@ -471,6 +476,16 @@ mod tests {
         assert!(db.lookup("microsoft@cn", "cn.example"));
         assert!(db.lookup("microsoft@cn@ms", "cn.example"));
         assert!(!db.lookup("microsoft@cn", "global.example"));
+    }
+
+    #[test]
+    fn discover_openclash_database_in_home_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("GeoSite.dat"), build_fixture()).unwrap();
+        let db = discover_and_load_from(&geosite_candidates_in(tmp.path()), None)
+            .expect("OpenClash's existing database should load without a download");
+        assert!(db.lookup("cn", "baidu.com"));
+        assert!(!db.lookup("ads", "baidu.com"));
     }
 
     #[test]

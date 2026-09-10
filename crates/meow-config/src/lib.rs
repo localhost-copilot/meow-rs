@@ -1878,21 +1878,35 @@ pub fn default_geoip_path() -> PathBuf {
     meow_config_dir().join("Country.mmdb")
 }
 
+/// GeoIP protobuf path, reusing OpenClash's `GeoIP.dat` when present.
 pub fn default_geoip_dat_path() -> PathBuf {
-    meow_config_dir().join("geoip.dat")
+    geodata_path_in(&meow_config_dir(), "geoip.dat", "GeoIP.dat")
 }
 
 /// Default path for the GeoLite2-ASN MMDB. Same discovery chain as GeoIP,
-/// with the upstream-compatible filename `GeoLite2-ASN.mmdb`.
+/// with `GeoLite2-ASN.mmdb` preferred over an existing OpenClash `ASN.mmdb`.
 pub fn default_asn_path() -> PathBuf {
-    meow_config_dir().join("GeoLite2-ASN.mmdb")
+    geodata_path_in(&meow_config_dir(), "GeoLite2-ASN.mmdb", "ASN.mmdb")
 }
 
 /// Default on-disk path for the geosite DB used by the geodata downloader.
 /// Uses `geosite.dat` since upstream MetaCubeX stopped publishing the `.mrs`
 /// release artifact; the loader transparently accepts either format.
+/// Reuses an existing OpenClash `GeoSite.dat` when the default is absent.
 pub fn default_geosite_path() -> PathBuf {
-    meow_config_dir().join("geosite.dat")
+    geodata_path_in(&meow_config_dir(), "geosite.dat", "GeoSite.dat")
+}
+
+fn geodata_path_in(directory: &Path, filename: &str, openclash_filename: &str) -> PathBuf {
+    let primary = directory.join(filename);
+    let alternate = directory.join(openclash_filename);
+    // Reuse OpenClash's databases on case-sensitive filesystems. Keep the
+    // existing name for new downloads and when both names are present.
+    if !primary.exists() && alternate.is_file() {
+        alternate
+    } else {
+        primary
+    }
 }
 
 /// Return the meow home directory.
@@ -3098,6 +3112,28 @@ mod dialer_proxy_tests {
 #[cfg(test)]
 mod geoip_context_tests {
     use super::*;
+
+    #[test]
+    fn geodata_reuses_openclash_files_without_creating_a_second_database() {
+        let directory = tempfile::tempdir().unwrap();
+        for (filename, alternate) in [
+            ("geoip.dat", "GeoIP.dat"),
+            ("geosite.dat", "GeoSite.dat"),
+            ("GeoLite2-ASN.mmdb", "ASN.mmdb"),
+        ] {
+            let primary = directory.path().join(filename);
+            assert_eq!(
+                geodata_path_in(directory.path(), filename, alternate),
+                primary
+            );
+            std::fs::write(directory.path().join(alternate), b"existing database").unwrap();
+            let selected = geodata_path_in(directory.path(), filename, alternate);
+            assert_eq!(std::fs::read(selected).unwrap(), b"existing database");
+            std::fs::write(&primary, b"preferred database").unwrap();
+            let selected = geodata_path_in(directory.path(), filename, alternate);
+            assert_eq!(std::fs::read(selected).unwrap(), b"preferred database");
+        }
+    }
 
     fn raw_with_rules(rules: Vec<&str>) -> raw::RawConfig {
         raw::RawConfig {
