@@ -115,10 +115,16 @@ async fn check_policy(authenticate: bool) {
     } else {
         ("MATCH", "DIRECT")
     };
-    assert_eq!(
-        tunnel.statistics().rule_match.snapshot(),
-        vec![(expected, 2)]
-    );
+    let matches = tunnel.statistics().rule_match.snapshot();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].0, expected);
+    if authenticate {
+        // REJECT's reply reader terminates immediately. A later datagram may
+        // therefore create another session and evaluate the same rule again.
+        assert!((2..=4).contains(&matches[0].1));
+    } else {
+        assert_eq!(matches[0].1, 2, "DIRECT must reuse each live session");
+    }
 }
 
 #[tokio::test]
