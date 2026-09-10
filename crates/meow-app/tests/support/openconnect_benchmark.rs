@@ -33,9 +33,8 @@ impl Profile {
     fn cipher(self) -> &'static str {
         match std::env::var("MEOW_BENCH_CIPHER").as_deref() {
             Ok("AES-128-GCM") => "AES-128-GCM",
-            Ok("AES-256-GCM") => "AES-256-GCM",
             Err(_) if self == Self::Legacy => "AES-128-GCM",
-            Err(_) => "AES-256-GCM",
+            Ok("AES-256-GCM") | Err(_) => "AES-256-GCM",
             _ => panic!("MEOW_BENCH_CIPHER must be AES-128-GCM or AES-256-GCM"),
         }
     }
