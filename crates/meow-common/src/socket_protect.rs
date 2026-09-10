@@ -440,22 +440,15 @@ async fn resolve_via_hook(
 /// consulted, but the protector still applies to the literal dial.
 pub async fn connect_tcp_host(host: &str, port: u16) -> io::Result<TcpStream> {
     let addrs = resolve_addrs(host, port).await?;
-    let mut last_err: Option<io::Error> = None;
-    for addr in &addrs {
-        match connect_tcp(*addr).await {
-            Ok(stream) => return Ok(stream),
-            Err(e) => last_err = Some(e),
-        }
+    let result =
+        crate::dial::connect_candidates(&addrs, crate::dial::tcp_concurrent(), connect_tcp).await;
+    if result.is_ok() {
+        return result;
     }
     // Every candidate failed — drop any cached system entry so the next dial
     // re-resolves. No-op for the literal / resolver-hook paths (not cached).
     sys_cache_evict(host);
-    Err(last_err.unwrap_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "connect_tcp_host: no addresses resolved",
-        )
-    }))
+    result
 }
 
 /// Resolve `host` to a single [`SocketAddr`] (the first candidate from
