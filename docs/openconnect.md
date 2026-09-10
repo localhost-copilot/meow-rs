@@ -5,6 +5,9 @@ IPv4/IPv6 TCP/UDP 流量送入 VPN。支持 authgroup、VPN DNS 和有界重连�
 多个连接共享同一节点的会话，不创建系统 VPN 接口，
 不修改系统路由或 DNS。
 
+AnyConnect 配置以本地 mihomo `260cce1f` 为基准对齐，完整字段、默认值和边界见
+[配置对齐说明](specs/openconnect-anyconnect-parity.md)。本次范围不包含 F5。
+
 从本 fork 的 v0.22.0 起，默认 `full` 功能集包含 `openconnect-dtls`，同时启用
 `openconnect`；`minimal` 仍需显式添加。CSTP 沿用 meow 的 BoringSSL TLS 层。
 OpenSSL DTLS 后端已通过真实 ocserv
@@ -57,7 +60,7 @@ rules:
   - MATCH,corp-vpn
 ```
 
-使用用户名密码时，删除 `cookie`，改为以下字段。两种认证方式不能同时配置。
+使用用户名密码时，删除 `cookie`，改为以下字段；同时提供时优先使用 Cookie。
 
 ```yaml
     username: "REPLACE_WITH_USERNAME"
@@ -66,8 +69,11 @@ rules:
 ```
 
 用户名密码认证使用 AnyConnect XML 表单，支持分步用户名/密码、组选择和隐藏字段，
-在同一条验证过证书的 TLS 连接上取得 Cookie 并建立 CSTP。最多处理 6 次响应，
-不自动重复提交密码；HTTP 重定向、HTML 登录、额外密码/MFA 挑战和设备检查明确报错。
+在验证过证书的 TLS 连接上取得 Cookie 并建立 CSTP。支持客户端证书、MCA、
+自定义表单字段、TOTP/RSA 软件令牌和 OIDC Bearer challenge。
+`http-keepalive-disabled` 会在请求之间重连，`xml-post-disabled` 使用 GET 和旧式表单提交。
+最多处理 6 次响应，不自动重复提交普通密码。浏览器交互、设备检查、任意 HTML 登录
+和 HTTP 重定向仍不支持；需要交互的节点可提供已取得的 Cookie。
 
 需要 IPv6 和内部域名时，在节点中启用以下选项，并按需要设置全局 `ipv6: true`：
 
@@ -89,7 +95,9 @@ VPN 网关自身的引导解析始终沿用外层解析路径。
 
 `server` 是裸主机名或 IP，端口单独配置；不接受含协议、路径或用户信息的 URL。
 CSTP 路径固定为 `/CSCOSSLC/tunnel`。`server-name` 默认使用 `server`，正常验证
-证书链和主机名；`ca` 文件中的证书加入默认根证书集合。相对 CA 路径按进程工作目录解析。
+证书链和主机名。`ca` 支持 mihomo 的内联 PEM，也兼容 PEM 文件路径；
+默认加入系统/内置根集合，`system-trust-disabled: true` 可关闭默认根。
+`cert` / `key` / MCA 证书和密钥也接受内联 PEM 或路径。相对路径按进程工作目录解析。
 
 ```bash
 ./target/release/meow -f /tmp/meow-openconnect.yml -t
@@ -139,7 +147,9 @@ TCP/UDP；参考网关的 App-ID PSK 与 ChaCha20-Poly1305 注入恢复。
 独立 OpenSSL 服务端的首包丢失重传和双向数据报，以及 UDP 黑洞截止测试通过。
 `auto` 已验证 UDP 阻断后原 TCP/UDP socket 继续通过 TLS 工作，解除阻断后重新
 进入 DTLS；`require` 已验证原 socket 失败，不向 TLS 重放不确定是否送达的数据报。
-参考网关的错误 PSK／恢复密钥拒绝测试通过。旧 Cisco DTLS 未列入支持范围。
+参考网关的错误 PSK／恢复密钥拒绝测试通过。`legacy-dtls` 默认开启，支持旧 Cisco
+DTLS 0.9 的 AES-CBC 注入恢复；已用独立 GnuTLS 服务端验证。
+`dtls-key-exchange: resumption` 只提供 AES-GCM 恢复，`dtls-local-port` 指定 UDP 本地端口。
 
 真实 ocserv 的吞吐、延迟、服务器计数和 mihomo 同配置对比见
 [性能报告](benchmarks/openconnect-iperf3-2026-09-09.md)。基准是显式运行的 ignored
@@ -203,20 +213,24 @@ MEOW_BINARY=/tmp/meow-openconnect-musl bash tests/openconnect/test_openwrt.sh
 - 配置校验不联网。首次业务拨号共享一次初始化；取消一个等待者不会取消其他等待者。
 - adapter 被替换或释放后，已有连接继续持有会话；最后一个使用者释放时关闭 CSTP 和栈任务。
 - 建连时的认证拒绝、证书错误和无效协议/配置立即失败；临时连接错误、超时及断线触发后台重连。
-  连续失败或存活不足 30 秒的会话最多尝试 5 次，退避依次为 1、2、4、8 秒。
-  稳定运行 30 秒后重新计算失败次数；达到上限后需重新加载节点。
+  重连窗口由 `reconnect-timeout` 控制，默认 300 秒；退避从 250 ms 增长到最多 30 秒。
+  稳定运行 30 秒后重新计算窗口；到期后需重新加载节点。
 - 每次重连创建独立代次的地址、MTU、DNS、栈及包队列，旧 TCP/UDP socket 明确失败。
   不恢复已有 TCP，不把发送结果不确定的 UDP 包重新发送到新代次。
-- MFA、浏览器认证和客户端证书尚未支持。
+- `token-mode` 支持 TOTP、RSA 和 OIDC；HOTP 与 mihomo YAML 一样，因缺少持久化计数回调而拒绝。
+- 浏览器认证和 `promote` 所需的交互回调未接入 CLI，不会静默提交空值。
 - 业务 UDP 不依赖 DTLS，也可作为 IP 包经 CSTP/TLS 传输。
-- IPv4 默认启用，IPv6 通过 `ipv6-disabled: false` 请求；可接受纯 IPv6 或双栈分配。
-  MTU 配置范围 576–1500，IPv6 至少为 1280，最终使用配置值与网关值中的较小值。
+- IPv4/IPv6 默认都请求；`ipv6-disabled: true` 关闭 IPv6，可接受纯 IPv6 或双栈分配。
+  MTU 配置范围 576–65535，IPv6 至少为 1280；0 自动计算，`base-mtu: 0` 探测外层 TCP。
+  最终取客户端与网关可接受的较小值；DTLS 还受单个 TLS 记录的 16383 字节 IP 包限制。
   UDP 载荷不得超过有效 MTU 减 28（IPv4）或 48（IPv6）字节，不做出站 IP 分片。
-- 每次认证及 CSTP 握手超时为 1–300 秒，默认 15 秒；外层拨号可以提前超时，
+- `handshake-timeout` 单位为秒，默认 0 表示不设置总握手期限；外层拨号可以提前超时，
   不取消其他使用者共享的初始化。TCP 目标建连由栈的 30 秒期限及外层拨号期限共同约束。
 - UDP 发送成功表示进入有界队列；接收队列满时丢包，不阻塞同隧道中的 TCP。
 - 未开启 `remote-dns-resolve` 时目标域名沿用现有解析路径。
-  split-DNS、压缩和 `dialer-proxy` 尚未实现，相关配置明确拒绝。
+  split-DNS 未实现；`compression` 默认 `stateless`，支持 LZ4/LZS，`all` 另启用 CSTP DEFLATE。
+- `dialer-proxy` 同时承载控制 TCP 和 DTLS UDP；前置代理不支持 UDP 时，`auto` 使用 CSTP，
+  `require` 失败。`interface-name`、`routing-mark`、`ip-version`、`tfo`、`mptcp` 控制外层拨号。
 - 每个节点的栈最多同时保留 1024 个 socket；缓冲和包队列有界。
 
 ## 验证范围
@@ -230,7 +244,7 @@ TCP/UDP 服务，验证 YAML → Mixed/SOCKS5 → CSTP → 服务，以及实际
 网关与目标均为本地测试 fixture；不依赖真实节点或用户秘密。
 
 阶段 2 增加 XML 认证、IPv6 入站、VPN DNS/组路由、DNS TCP 回退、重连换址与缓存隔离、
-等待者取消、初始化中关闭、旧 socket 失败和 5 次重试上限测试。
+等待者取消、初始化中关闭、旧 socket 失败和重连截止测试。
 
 ```bash
 cargo test -p meow-netstack -p meow-openconnect

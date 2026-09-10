@@ -61,6 +61,17 @@ pub trait TcpDialer: Send + Sync {
     fn is_proxy(&self) -> bool {
         false
     }
+
+    /// Open a datagram relay through the same front proxy as TCP.
+    async fn dial_udp(
+        &self,
+        _peer: SocketAddr,
+    ) -> io::Result<Box<dyn meow_common::ProxyPacketConn>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "dialer does not support UDP",
+        ))
+    }
 }
 
 /// Direct TCP dialer — the default, equivalent to mihomo's `dialer.NewDialer()`.
@@ -168,6 +179,27 @@ impl TcpDialer for ProxyDialer {
 
     fn is_proxy(&self) -> bool {
         true
+    }
+
+    async fn dial_udp(
+        &self,
+        peer: SocketAddr,
+    ) -> io::Result<Box<dyn meow_common::ProxyPacketConn>> {
+        self.proxy
+            .dial_udp(&Metadata {
+                network: Network::Udp,
+                conn_type: ConnType::Inner,
+                dst_ip: Some(peer.ip()),
+                dst_port: peer.port(),
+                ..Default::default()
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "dialer-proxy could not establish UDP relay",
+                )
+            })
     }
 }
 

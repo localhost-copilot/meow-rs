@@ -37,7 +37,7 @@ snell = ["dep:argon2", "dep:aes-gcm", "meow-transport/simple-obfs"]
 # `anytls_rs`). The client's TLS is supplied by meow-transport's BoringSSL
 # TlsLayer through anytls-rs's `TlsConnect` hook, so no second TLS stack.
 anytls = ["dep:meow-anytls"]
-openconnect = ["dep:meow-openconnect", "dep:meow-netstack", "dep:tokio-util", "dep:hickory-proto"]
+openconnect = ["dep:meow-openconnect", "dep:meow-netstack", "dep:tokio-util", "dep:hickory-proto", "dep:boring", "dep:tokio-boring", "dep:tokio-tfo", "dep:webpki-root-certs"]
 openconnect-dtls = ["openconnect", "meow-openconnect/dtls"]
 # Hysteria2 outbound implemented in-tree on top of quiche (BoringSSL-native
 # QUIC + HTTP/3), so it links no rustls and no second crypto library.
@@ -68,6 +68,8 @@ quiche = { workspace = true, optional = true }
 # BoringSSL SslContextBuilder for the quiche TLS config (cert verify / pin).
 # Same `boring` crate (and vendored library) meow-transport links.
 boring = { workspace = true, optional = true }
+tokio-boring = { workspace = true, optional = true }
+tokio-tfo = { version = "0.4.3", optional = true }
 # Mozilla CA roots for the hysteria2 quiche verify store (mirrors meow-transport).
 webpki-root-certs = { workspace = true, optional = true }
 blake2 = { workspace = true, optional = true }
