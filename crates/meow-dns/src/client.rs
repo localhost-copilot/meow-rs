@@ -146,11 +146,20 @@ pub enum ClientError {
 /// `factory().connect_tcp` — see ADR-0012 (issue #67 phase 2).
 pub type DnsProxy = Arc<dyn meow_common::Proxy>;
 
+/// Resolve a configured outbound against the current routing snapshot.
+/// Implementations should capture weak references to avoid resolver/proxy cycles.
+pub type ProxyLookup = Arc<dyn Fn(&str) -> Option<DnsProxy> + Send + Sync>;
+
+enum ProxyBinding {
+    Fixed(DnsProxy),
+    Dynamic { name: String, lookup: ProxyLookup },
+}
+
 /// A single DNS upstream the resolver can query.
 pub struct DnsClient {
     transport: Transport,
     timeout: Duration,
-    proxy: Option<DnsProxy>,
+    proxy: parking_lot::RwLock<Option<ProxyBinding>>,
     label: Option<Arc<str>>,
     /// Idle direct `tcp://` connections. Streams are checked out for the whole
     /// exchange and returned only after the DNS response is fully validated.
@@ -278,7 +287,7 @@ impl DnsClient {
         Self {
             transport: Transport::Udp { addr },
             timeout: DEFAULT_QUERY_TIMEOUT,
-            proxy: None,
+            proxy: Default::default(),
             label: None,
             tcp_pool: TcpPool::new(),
         }
@@ -289,7 +298,7 @@ impl DnsClient {
         Self {
             transport: Transport::Tcp { addr },
             timeout: DEFAULT_QUERY_TIMEOUT,
-            proxy: None,
+            proxy: Default::default(),
             label: None,
             tcp_pool: TcpPool::new(),
         }
@@ -300,7 +309,7 @@ impl DnsClient {
         Self {
             transport: Transport::RCode { code },
             timeout: DEFAULT_QUERY_TIMEOUT,
-            proxy: None,
+            proxy: Default::default(),
             label: None,
             tcp_pool: TcpPool::new(),
         }
@@ -315,7 +324,7 @@ impl DnsClient {
                 sni: Arc::from(sni),
             },
             timeout: DEFAULT_QUERY_TIMEOUT,
-            proxy: None,
+            proxy: Default::default(),
             label: None,
             tcp_pool: TcpPool::new(),
         }
@@ -331,7 +340,7 @@ impl DnsClient {
                 path: Arc::from(path),
             },
             timeout: DEFAULT_QUERY_TIMEOUT,
-            proxy: None,
+            proxy: Default::default(),
             label: None,
             tcp_pool: TcpPool::new(),
         }
@@ -352,8 +361,30 @@ impl DnsClient {
     ///   adapters can't relay arbitrary UDP. The fallback matches the
     ///   semantics in ADR-0012.
     pub fn with_proxy(mut self, proxy: DnsProxy) -> Self {
-        self.proxy = Some(proxy);
+        *self.proxy.get_mut() = Some(ProxyBinding::Fixed(proxy));
         self
+    }
+
+    /// Replace the startup adapter with a live lookup, releasing the old adapter.
+    /// An absent outbound fails the query rather than silently bypassing routing.
+    pub fn set_proxy_lookup(&self, lookup: ProxyLookup) {
+        let mut binding = self.proxy.write();
+        let name = match binding.as_ref() {
+            Some(ProxyBinding::Fixed(proxy)) => proxy.name().to_string(),
+            Some(ProxyBinding::Dynamic { name, .. }) => name.clone(),
+            None => return,
+        };
+        *binding = Some(ProxyBinding::Dynamic { name, lookup });
+    }
+
+    fn query_proxy(&self) -> Result<Option<DnsProxy>, ClientError> {
+        match self.proxy.read().as_ref() {
+            None => Ok(None),
+            Some(ProxyBinding::Fixed(proxy)) => Ok(Some(Arc::clone(proxy))),
+            Some(ProxyBinding::Dynamic { name, lookup }) => lookup(name).map(Some).ok_or(
+                ClientError::Protocol("configured DNS outbound is unavailable"),
+            ),
+        }
     }
 
     /// Override the API/UI label used to report this upstream in DNS results.
@@ -366,7 +397,7 @@ impl DnsClient {
     /// (`with_proxy`). Exposed so config-layer tests can assert that
     /// `#PROXY`-tagged nameserver entries actually got their adapter wired.
     pub fn is_proxied(&self) -> bool {
-        self.proxy.is_some()
+        self.proxy.read().is_some()
     }
 
     /// Human-readable upstream identifier for API/UI surfaces.
@@ -407,7 +438,7 @@ impl DnsClient {
                 }
             }
         };
-        if self.proxy.is_some() {
+        if self.is_proxied() {
             label.push_str("#PROXY");
         }
         label
@@ -714,10 +745,10 @@ impl DnsClient {
         wire: &[u8],
         expected: &ExpectedResponse,
     ) -> Result<Message, ClientError> {
+        let proxy = self.query_proxy()?;
         match &self.transport {
-            Transport::Udp { addr } | Transport::Tcp { addr } if self.proxy.is_some() => {
-                let response =
-                    proxy_tcp_exchange(self.proxy.as_ref().unwrap(), *addr, wire).await?;
+            Transport::Udp { addr } | Transport::Tcp { addr } if proxy.is_some() => {
+                let response = proxy_tcp_exchange(proxy.as_ref().unwrap(), *addr, wire).await?;
                 decode_validated_response(&response, expected)
             }
             Transport::Udp { addr } => udp_exchange(*addr, wire, expected).await,
@@ -727,12 +758,12 @@ impl DnsClient {
             )),
             #[cfg(feature = "encrypted")]
             Transport::Dot { addr, sni } => {
-                let response = dot_exchange(*addr, sni, wire, self.proxy.as_ref()).await?;
+                let response = dot_exchange(*addr, sni, wire, proxy.as_ref()).await?;
                 decode_validated_response(&response, expected)
             }
             #[cfg(feature = "encrypted")]
             Transport::Doh { addr, sni, path } => {
-                let response = doh_exchange(*addr, sni, path, wire, self.proxy.as_ref()).await?;
+                let response = doh_exchange(*addr, sni, path, wire, proxy.as_ref()).await?;
                 decode_validated_response(&response, expected)
             }
         }
