@@ -109,22 +109,22 @@ pub async fn parse_dns(
         if use_hosts && use_system_hosts {
             merge_system_hosts(&mut proxy_hosts).await;
         }
-        Some(Arc::new(
-            Resolver::new_with_bootstrap_with_proxies(
-                proxy_ns_urls,
-                vec![],
-                default_ns_urls.clone(),
-                DnsMode::Normal,
-                proxy_hosts,
-                use_hosts,
-                dns.ipv6.unwrap_or(false),
-                None,
-                None,
-                proxy_registry,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("proxy-server-nameserver: {e}"))?,
-        ))
+        let mut proxy = Resolver::new_with_bootstrap_with_proxies(
+            proxy_ns_urls,
+            vec![],
+            default_ns_urls.clone(),
+            DnsMode::Normal,
+            proxy_hosts,
+            use_hosts,
+            dns.ipv6.unwrap_or(false),
+            None,
+            None,
+            proxy_registry,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("proxy-server-nameserver: {e}"))?;
+        proxy.set_cache_algorithm(cache_algorithm);
+        Some(Arc::new(proxy))
     };
 
     // Build nameserver-policy if configured.
