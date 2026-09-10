@@ -62,6 +62,30 @@ impl AnytlsAdapter {
         skip_cert_verify: bool,
         udp: bool,
     ) -> std::result::Result<Self, String> {
+        let effective_sni = sni.filter(|s| !s.trim().is_empty()).unwrap_or(server);
+        Self::new_with_tls(
+            name,
+            server,
+            port,
+            password,
+            udp,
+            TlsConfig {
+                skip_cert_verify,
+                ..TlsConfig::new(effective_sni)
+            },
+        )
+    }
+
+    /// Build an AnyTLS adapter with the shared transport's TLS settings,
+    /// including ClientHello fingerprint shaping and ALPN.
+    pub fn new_with_tls(
+        name: &str,
+        server: &str,
+        port: u16,
+        password: &str,
+        udp: bool,
+        mut tls_config: TlsConfig,
+    ) -> std::result::Result<Self, String> {
         // Bridge meow_common's outbound-socket hooks (resolver-aware TCP
         // dialer + Android `SocketProtector`) into anytls-rs's separate
         // registries exactly once — see `install_anytls_bridges`.
@@ -69,17 +93,19 @@ impl AnytlsAdapter {
 
         let server_addr = format!("{server}:{port}");
 
-        let effective_sni = sni.filter(|s| !s.trim().is_empty()).unwrap_or(server);
+        let effective_sni = tls_config
+            .sni
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(server);
         let server_name =
             normalize_server_name(effective_sni).map_err(|e| format!("anytls[{name}]: {e}"))?;
 
         // Same BoringSSL TlsLayer every other TLS outbound uses; the
         // SSL_CTX is shared across proxies with the same shaping key.
-        let tls_layer = TlsLayer::new(&TlsConfig {
-            skip_cert_verify,
-            ..TlsConfig::new(server_name)
-        })
-        .map_err(|e| format!("anytls[{name}]: tls config: {e}"))?;
+        tls_config.sni = Some(server_name);
+        let tls_layer =
+            TlsLayer::new(&tls_config).map_err(|e| format!("anytls[{name}]: tls config: {e}"))?;
         let tls: Arc<dyn TlsConnect> = Arc::new(MeowTlsConnect { layer: tls_layer });
 
         let padding = PaddingFactory::default();
