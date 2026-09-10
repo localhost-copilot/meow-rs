@@ -170,7 +170,13 @@ pub async fn parse_dns(
     // silently fall back to the upstream resolver, which is a user-surprising
     // privacy regression.
     if mode == DnsMode::FakeIp {
-        install_fakeip(&mut resolver, dns, cache_dir).await?;
+        let persist = raw
+            .profile
+            .as_ref()
+            .and_then(|p| p.store_fake_ip)
+            .or(dns.store_fake_ip)
+            .unwrap_or(false);
+        install_fakeip(&mut resolver, dns, cache_dir, persist).await?;
     }
 
     Ok(DnsConfig {
@@ -185,6 +191,7 @@ async fn install_fakeip(
     resolver: &mut Resolver,
     dns: &crate::raw::RawDns,
     cache_dir: Option<&std::path::Path>,
+    persist: bool,
 ) -> Result<(), anyhow::Error> {
     let range_str = dns
         .fake_ip_range
@@ -194,7 +201,6 @@ async fn install_fakeip(
         .parse()
         .map_err(|e| anyhow::anyhow!("dns.fake-ip-range '{range_str}' is not a valid CIDR: {e}"))?;
 
-    let persist = dns.store_fake_ip.unwrap_or(false);
     let store_path = |suffix: &str| -> std::path::PathBuf {
         let base = cache_dir.map_or_else(
             || std::path::PathBuf::from("."),
