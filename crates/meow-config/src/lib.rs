@@ -96,13 +96,10 @@ pub struct GeneralConfig {
 /// across six `unwrap_or(...)` call sites (review), which is how the
 /// parser and `GET /configs` ended up disagreeing in the first place.
 ///
-/// Defaults to **`false`**, matching Go mihomo / Clash: an operator must
-/// opt in to IPv6 resolution explicitly. (The temporary flip to `true`
-/// was reverted to stay consistent with the upstream ecosystem; see the
-/// CHANGELOG.) When `false`, AAAA lookups are skipped and the resolver
-/// answers IPv4-only — set `ipv6: true` for dual-stack resolution.
+/// Defaults to `true`, matching the reference mihomo's `DefaultRawConfig`.
+/// DNS answers have their own `dns.ipv6` switch, whose default is `false`.
 pub fn effective_ipv6(raw_ipv6: Option<bool>) -> bool {
-    raw_ipv6.unwrap_or(false)
+    raw_ipv6.unwrap_or(true)
 }
 
 pub struct DnsConfig {
