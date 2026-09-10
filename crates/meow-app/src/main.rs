@@ -810,6 +810,7 @@ async fn run(
     meow_common::dial::set_tcp_concurrent(config.raw.tcp_concurrent.unwrap_or(false));
     let tunnel = Tunnel::new(Arc::clone(&config.dns.resolver));
     tunnel.set_mode(config.general.mode);
+    tunnel.set_find_process_mode(config.raw.find_process_mode.unwrap_or_default());
     tunnel.update_routing(config.proxies, config.rules);
     tunnel.spawn_background_tasks();
 
