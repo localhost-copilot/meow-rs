@@ -190,7 +190,8 @@ pub(super) fn identity(
             .as_secs();
         let threshold = now + u64::from(days) * 86400;
         let threshold = Asn1Time::from_unix(
-            i64::try_from(threshold)
+            threshold
+                .try_into()
                 .map_err(|_| invalid("certificate expiry warning too large"))?,
         )
         .map_err(crypto_error)?;
