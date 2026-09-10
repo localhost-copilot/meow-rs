@@ -8,6 +8,50 @@ the canonical, in-repo source a release is cut from.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-09-10
+
+### Added
+
+- Align AnyConnect configuration with mihomo; F5 remains outside this release.
+- QUIC Initial SNI sniffing and routing for SOCKS5 and TUN UDP flows.
+- DNS ARC caching, live outbound-group routing, native UDP upstream routing,
+  `respect-rules`, and dedicated direct nameservers with policy handling.
+- Top-level GeoData settings, GeoIP DAT loading, and live rule/DNS refresh.
+
+### Changed
+
+- Global outbound IPv6 defaults to enabled; DNS IPv6 is independently disabled
+  by default. Honor `allow-lan`, `tcp-concurrent`, `unified-delay`, process lookup
+  mode, profile persistence, and provider-backed `empty-fallback`.
+- VLESS UDP defaults to XUDP while retaining Reality/Vision handling.
+- Health probes use current provider-owned adapters, including same-name
+  replacements; group delay requests preserve successful members on timeout.
+
+### Fixed
+
+- Keep IPv4-only AnyConnect sessions alive when unsolicited IPv6 packets arrive.
+- Preserve asynchronous BoringSSL BIO retry state during flush.
+- Send AnyTLS UDP data before waiting for stream acknowledgement; apply the
+  configured ClientHello fingerprint and ALPN.
+- Honor HTTP/TLS sniffing policy and destination overrides.
+- Accept completed HTTP responses when health-check status filtering is unset.
+- Download only referenced GeoData databases at startup.
+
+### Validation and known limits
+
+- 1341 library tests and 84 API integration tests passed; default full builds
+  and ARM64 musl DTLS were verified on a physical OpenWrt-derived router.
+- Local DTLS four-flow iperf upload remains 10.3% slower than the measured
+  mihomo reference; four-flow bidirectional TCP echo remains 33.5% slower.
+  Further performance work is separate from this compatibility release.
+- See [release notes](docs/releases/v0.23.0.md) and
+  [the complete benchmark](docs/benchmarks/mihomo-yaml-parity-2026-09-10.md).
+
+## Earlier development notes (through v0.22.0)
+
+The notes below preserve the earlier changelog. The v0.23.0 behavior changes
+above supersede their IPv6 defaults and runtime dependency descriptions.
+
 ### Changed
 
 - **BoringSSL is now the only crypto library; rustls is gone from the runtime.**
