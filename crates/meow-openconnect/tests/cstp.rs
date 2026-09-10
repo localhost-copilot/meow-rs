@@ -69,6 +69,66 @@ async fn fragmented_headers_coalesced_data_and_simultaneous_control() {
 }
 
 #[tokio::test]
+async fn unsolicited_ipv6_does_not_disconnect_an_ipv4_tunnel() {
+    use meow_openconnect::compression::Mode;
+    use meow_openconnect::{connect_configured, write_frame, ConnectSettings};
+
+    for compressed in [false, true] {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let (client, mut server) = tokio::io::duplex(8192);
+            let peer = tokio::spawn(async move {
+                consume_request(&mut server).await;
+                server
+                    .write_all(&RESPONSE[..RESPONSE.len() - 2])
+                    .await
+                    .unwrap();
+                if compressed {
+                    server
+                        .write_all(b"X-CSTP-Content-Encoding: oc-lz4\r\n")
+                        .await
+                        .unwrap();
+                }
+                server.write_all(b"\r\n").await.unwrap();
+                let mut unsolicited = vec![0; 40];
+                unsolicited[0] = 0x60;
+                for data in [unsolicited, packet()] {
+                    if compressed {
+                        write_frame(&mut server, 8, &lz4_flex::block::compress(&data))
+                            .await
+                            .unwrap();
+                    } else {
+                        write_frame(&mut server, 0, &data).await.unwrap();
+                    }
+                }
+                write_frame(&mut server, 3, &[]).await.unwrap();
+                assert_eq!(read_frame(&mut server, 1280).await.unwrap(), (4, vec![]));
+                server
+            });
+            let connection = connect_configured(
+                client,
+                &options(),
+                &ConnectSettings {
+                    compression: Mode::Stateless,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let (_outgoing, rx) = mpsc::channel(2);
+            let (tx, mut incoming) = mpsc::channel(2);
+            let cancel = CancellationToken::new();
+            let worker = tokio::spawn(connection.run(rx, tx, cancel.clone()));
+            assert_eq!(incoming.recv().await.unwrap(), packet());
+            let _server = peer.await.unwrap();
+            cancel.cancel();
+            worker.await.unwrap().unwrap();
+        })
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn rejected_cookie_and_unsupported_compression_do_not_echo_server_body() {
     for response in [
         b"HTTP/1.1 403 forbidden-private-text\r\n\r\n".as_slice(),

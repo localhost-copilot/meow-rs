@@ -142,7 +142,9 @@ async fn run_data(
                 received = Instant::now();
                 match packet.first() {
                     Some(0) => {
-                        network.validate_packet(&packet[1..])?;
+                        if !network.accepts_packet(&packet[1..])? {
+                            continue;
+                        }
                         packet.remove(0);
                         // Keep at most one undelivered IP packet. Waiting inline
                         // here can block outbound ACKs needed to drain the stack.
@@ -150,7 +152,9 @@ async fn run_data(
                     }
                     Some(8) => {
                         let packet = decoder.decode(&packet[1..], network.mtu)?;
-                        network.validate_packet(&packet)?;
+                        if !network.accepts_packet(&packet)? {
+                            continue;
+                        }
                         pending = deliver_or_defer(&incoming, packet)?;
                     }
                     Some(3) => failure = send(channel.as_mut().expect("active"), &[4]).await.err(),
