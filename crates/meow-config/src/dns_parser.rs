@@ -39,7 +39,10 @@ pub async fn parse_dns(
                 DnsMode::Normal,
                 hosts,
                 use_hosts,
-                crate::effective_ipv6(raw.ipv6),
+                raw.dns
+                    .as_ref()
+                    .and_then(|dns| dns.ipv6)
+                    .unwrap_or_else(|| crate::effective_ipv6(raw.ipv6)),
             );
             return Ok(DnsConfig {
                 resolver: Arc::new(resolver),
@@ -111,7 +114,7 @@ pub async fn parse_dns(
                 DnsMode::Normal,
                 proxy_hosts,
                 use_hosts,
-                crate::effective_ipv6(raw.ipv6),
+                dns.ipv6.unwrap_or(false),
                 None,
                 None,
                 proxy_registry,
@@ -164,7 +167,7 @@ pub async fn parse_dns(
         mode,
         hosts,
         use_hosts,
-        crate::effective_ipv6(raw.ipv6),
+        dns.ipv6.unwrap_or(false),
         policy,
         fallback_filter,
         proxy_registry,
@@ -896,6 +899,25 @@ fn normalize_hosts_wildcard(s: &str) -> String {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    #[tokio::test]
+    async fn dns_ipv6_controls_answers_independently_of_outbound_ipv6() {
+        for (global, dns_ipv6, expected) in [
+            (true, "false", false),
+            (false, "true", true),
+            (true, "null", false),
+        ] {
+            let config = crate::load_config_from_str(&format!("ipv6: {global}\nhosts:\n  dual.example: ['192.0.2.1', '2001:db8::1']\ndns:\n  enable: true\n  ipv6: {dns_ipv6}\n  nameserver: [1.1.1.1]\n  proxy-server-nameserver: [1.1.1.1]\n")).await.unwrap();
+            for resolver in [
+                &config.dns.resolver,
+                config.dns.proxy_resolver.as_ref().unwrap(),
+            ] {
+                let ips = resolver.resolve_ips("dual.example").await.unwrap();
+                assert_eq!(ips.iter().any(std::net::IpAddr::is_ipv6), expected);
+                assert!(ips.iter().any(std::net::IpAddr::is_ipv4));
+            }
+        }
+    }
 
     fn one(s: &str) -> HostsValue {
         HostsValue::One(s.to_string())
