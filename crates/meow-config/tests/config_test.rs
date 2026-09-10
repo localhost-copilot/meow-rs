@@ -38,11 +38,9 @@ async fn test_general_config_table() {
             yaml: "",
             mode: "rule",
             log_level: "info",
-            // Default matches mihomo/Clash: IPv6 resolution is opt-in
-            // (`meow_config::effective_ipv6`).
-            ipv6: false,
+            ipv6: true,
             allow_lan: false,
-            bind_address: "127.0.0.1",
+            bind_address: "0.0.0.0",
         },
         Case {
             label: "custom general section",
@@ -66,7 +64,7 @@ bind-address: "0.0.0.0"
             log_level: "info",
             ipv6: false,
             allow_lan: false,
-            bind_address: "127.0.0.1",
+            bind_address: "0.0.0.0",
         },
     ];
 
