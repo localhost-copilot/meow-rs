@@ -116,7 +116,9 @@ else
     fail "tproxy_relay"
 fi
 
-# Test 9: tproxy_sni_extract — SNI extraction from TLS ClientHello
+# Test 9: tproxy_sni_extract — sniffed SNI selects the DOMAIN rule.
+# The legacy knob preserves the IP destination, so the connection address
+# alone need not contain the SNI and debug logging need not be enabled.
 # Build a minimal TLS ClientHello with SNI "sni.example.com" (15 bytes)
 # Lengths: SNI name=15, entry=18(3+15), list=18, ext_data=20(2+18), ext=24(4+20)
 # Extensions total=24
@@ -138,10 +140,13 @@ fi
     printf '\x00'                            # Host name type: 0
     printf '\x00\x0f'                        # Host name length: 15
     printf 'sni.example.com'                # Hostname (15 bytes)
-} | timeout 3 nc -w 2 10.88.0.1 443 2>/dev/null || true
+} > /tmp/client-hello.bin
+# Assemble the fixture before sending: the many printf/dd writes above must
+# not race the sniffer's initial peek with a partially constructed record.
+timeout 3 nc -w 2 10.88.0.1 443 < /tmp/client-hello.bin 2>/dev/null || true
 sleep 1
 
-if grep -q "sni.example.com" /tmp/meow.log 2>/dev/null; then
+if grep -q "match DOMAIN(sni.example.com) using REJECT" /tmp/meow.log 2>/dev/null; then
     pass "tproxy_sni_extract"
 else
     fail "tproxy_sni_extract"

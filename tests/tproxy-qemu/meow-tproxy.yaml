@@ -21,4 +21,5 @@ proxies:
     password: "test-password"
 
 rules:
+  - "DOMAIN,sni.example.com,REJECT"
   - "MATCH,DIRECT"
