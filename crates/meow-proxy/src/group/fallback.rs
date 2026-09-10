@@ -250,6 +250,14 @@ impl Proxy for FallbackGroup {
         Some(self.member_names())
     }
 
+    fn member_proxies(&self) -> Option<Vec<Arc<dyn Proxy>>> {
+        Some(super::live_members(
+            &self.static_proxies,
+            &self.provider_slots,
+            self.empty_fallback.as_ref(),
+        ))
+    }
+
     fn current(&self) -> Option<String> {
         self.first_alive().map(|p| p.name().to_string())
     }

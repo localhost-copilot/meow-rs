@@ -244,6 +244,14 @@ impl Proxy for SelectorGroup {
         Some(self.proxy_names())
     }
 
+    fn member_proxies(&self) -> Option<Vec<Arc<dyn Proxy>>> {
+        Some(super::live_members(
+            &self.static_proxies,
+            &self.provider_slots,
+            self.empty_fallback.as_ref(),
+        ))
+    }
+
     fn current(&self) -> Option<String> {
         self.selected_proxy().map(|p| p.name().into())
     }
