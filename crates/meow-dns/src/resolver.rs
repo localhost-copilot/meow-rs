@@ -114,6 +114,19 @@ impl Default for NameserverPolicy {
 }
 
 impl NameserverPolicy {
+    fn set_proxy_lookup(&self, lookup: &crate::client::ProxyLookup) {
+        let update = |entry: &PolicyEntry| {
+            for client in &entry.nameservers {
+                client.set_proxy_lookup(Arc::clone(lookup));
+            }
+        };
+        self.exact.values().for_each(update);
+        self.wildcard.for_each_value(update);
+        self.matchers
+            .iter()
+            .for_each(|matcher| update(&matcher.entry));
+    }
+
     pub fn new() -> Self {
         Self {
             exact: HashMap::new(),
@@ -590,6 +603,19 @@ async fn query_pool_generic(
 }
 
 impl Resolver {
+    /// Keep named DNS outbounds synchronized with configuration and group changes.
+    pub fn set_proxy_lookup(&self, lookup: crate::client::ProxyLookup) {
+        for client in self.main.iter().chain(self.fallback.iter().flatten()) {
+            client.set_proxy_lookup(Arc::clone(&lookup));
+        }
+        if let Some(policy) = &self.policy {
+            policy.set_proxy_lookup(&lookup);
+        }
+        if let Some(direct) = &self.direct_resolver {
+            direct.set_proxy_lookup(lookup);
+        }
+    }
+
     /// Dedicated real-address resolver for DIRECT outbounds. Sharing policy
     /// does not share caches or fake-IP allocations with the client resolver.
     pub fn set_direct_resolver(&mut self, mut resolver: Resolver, follow_policy: bool) {
