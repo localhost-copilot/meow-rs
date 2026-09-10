@@ -154,12 +154,13 @@ pub async fn parse_dns(
     } else {
         let raw_filter = dns.fallback_filter.clone();
         let mmdb_path = mmdb_path.map(std::path::Path::to_path_buf);
+        let geo = crate::geodata::parse_geodata_config(raw)?;
         Some(
             crate::spawn_blocking_with_current_dispatcher(move || {
-                build_fallback_filter(raw_filter.as_ref(), mmdb_path.as_deref())
+                build_fallback_filter_with_geo(raw_filter.as_ref(), mmdb_path.as_deref(), &geo)
             })
             .await
-            .map_err(|e| anyhow::anyhow!("fallback-filter build task failed: {e}"))?,
+            .map_err(|e| anyhow::anyhow!("fallback-filter build task failed: {e}"))??,
         )
     };
 
@@ -693,6 +694,36 @@ async fn resolve_policy_host(
 ///
 /// If `geoip: true` but no MMDB is available, GeoIP gate is disabled with a
 /// `warn!`. Class B per ADR-0002: NOT a startup error.
+fn build_fallback_filter_with_geo(
+    raw: Option<&crate::raw::RawFallbackFilter>,
+    mmdb_path: Option<&std::path::Path>,
+    geo: &crate::GeoDataConfig,
+) -> Result<FallbackFilter, anyhow::Error> {
+    if !geo.mode || !raw.and_then(|filter| filter.geoip).unwrap_or(true) {
+        return Ok(build_fallback_filter(raw, mmdb_path));
+    }
+    let mut without_mmdb = raw.cloned().unwrap_or(crate::raw::RawFallbackFilter {
+        geoip: None,
+        geoip_code: None,
+        ipcidr: None,
+        domain: None,
+    });
+    without_mmdb.geoip = Some(false);
+    let mut filter = build_fallback_filter(Some(&without_mmdb), None);
+    let (path, _) = geo.country_database();
+    let bytes = std::fs::read(&path)?;
+    let allowed = std::collections::HashSet::from([filter.geoip_code.to_ascii_uppercase()]);
+    let index = meow_rules::geoip_dat::from_dat_bytes(&bytes, Some(&allowed))
+        .map_err(anyhow::Error::msg)?;
+    let ranges = index.ranges_for(&filter.geoip_code);
+    filter.geoip_enabled = true;
+    filter.geoip_matcher = Some(Arc::new(move |ip| match ip {
+        IpAddr::V4(ip) => ranges.v4.contains(&ip),
+        IpAddr::V6(ip) => ranges.v6.contains(&ip),
+    }));
+    Ok(filter)
+}
+
 fn build_fallback_filter(
     raw: Option<&crate::raw::RawFallbackFilter>,
     explicit_mmdb_path: Option<&std::path::Path>,
@@ -759,6 +790,7 @@ fn build_fallback_filter(
         ipcidr,
         domain,
         geoip_reader,
+        geoip_matcher: None,
     }
 }
 

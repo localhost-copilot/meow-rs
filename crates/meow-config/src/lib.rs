@@ -1472,7 +1472,8 @@ pub fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyho
 /// subsequent parser-context build will hard-error if the file is still
 /// absent, giving a clear diagnostic.
 async fn ensure_geodata(raw: &raw::RawConfig, geo: &GeoDataConfig, scan_lines: &[String]) {
-    let needs_geoip = scan_lines.iter().any(|l| line_references_geoip(l));
+    let needs_geoip =
+        scan_lines.iter().any(|l| line_references_geoip(l)) || dns_fallback_uses_geoip(raw);
     let needs_asn = scan_lines.iter().any(|l| line_references_asn(l));
     let needs_geosite =
         scan_lines.iter().any(|l| line_references_geosite(l)) || dns_policy_uses_geosite(raw);
@@ -1481,7 +1482,7 @@ async fn ensure_geodata(raw: &raw::RawConfig, geo: &GeoDataConfig, scan_lines: &
         return;
     }
 
-    let geoip_path = geo.mmdb_path.clone().unwrap_or_else(default_geoip_path);
+    let (geoip_path, geoip_url) = geo.country_database();
     let asn_path = geo.asn_path.clone().unwrap_or_else(default_asn_path);
     let geosite_path = geo
         .geosite_path
@@ -1514,13 +1515,13 @@ async fn ensure_geodata(raw: &raw::RawConfig, geo: &GeoDataConfig, scan_lines: &
 
     let mut downloads = Vec::new();
     if geoip_missing {
-        downloads.push((&geo.mmdb_url, geoip_path));
+        downloads.push((geoip_url, geoip_path));
     }
     if asn_missing {
-        downloads.push((&geo.asn_url, asn_path));
+        downloads.push((geo.asn_url.as_str(), asn_path));
     }
     if geosite_missing {
-        downloads.push((&geo.geosite_url, geosite_path));
+        downloads.push((geo.geosite_url.as_str(), geosite_path));
     }
 
     for (url, dest) in downloads {
@@ -1538,7 +1539,7 @@ fn build_parser_context_from_raw(
     raw: &raw::RawConfig,
     provider_payloads: &rule_provider::PrefetchedPayloads,
 ) -> Result<meow_rules::ParserContext, anyhow::Error> {
-    let geo = geodata::parse_geodata(raw.geodata.as_ref())?;
+    let geo = geodata::parse_geodata_config(raw)?;
     build_parser_context_with_geo(raw, &geo, provider_payloads)
 }
 
@@ -1547,7 +1548,7 @@ fn build_parser_context_with_geo(
     geo: &GeoDataConfig,
     provider_payloads: &rule_provider::PrefetchedPayloads,
 ) -> Result<meow_rules::ParserContext, anyhow::Error> {
-    let geoip_path = geo.mmdb_path.clone().unwrap_or_else(default_geoip_path);
+    let (geoip_path, _) = geo.country_database();
     let asn_path = geo.asn_path.clone().unwrap_or_else(default_asn_path);
     build_parser_context_at(
         raw,
@@ -1573,16 +1574,29 @@ fn build_parser_context_at(
     // blocks, and rule-provider payloads — so a GEOIP/IP-ASN/GEOSITE key used
     // only outside `rules:` still gets binned into the indexes (issue #277).
     let lines = collect_geo_scan_lines(raw, provider_payloads);
+    let geo = geodata::parse_geodata_config(raw)?;
 
     let geoip_trigger = lines.iter().find(|l| line_references_geoip(l));
     let geoip = match geoip_trigger {
         Some(trigger) => {
-            let reader = load_mmdb_mmap(geoip_path, "GeoIP", trigger)?;
             let allowed = collect_geoip_countries(&lines);
-            let index = meow_rules::country_index::CountryIndex::build(&reader, &allowed)
-                .map_err(|e| anyhow::anyhow!("failed to build GeoIP country index: {e}"))?;
-            // reader is mmap-backed — pages are returned to the OS on drop.
-            drop(reader);
+            let index = if geo.mode {
+                let bytes = std::fs::read(geoip_path).map_err(|e| {
+                    anyhow::anyhow!(
+                        "GeoIP rule '{trigger}' cannot read {}: {e}",
+                        geoip_path.display()
+                    )
+                })?;
+                meow_rules::geoip_dat::from_dat_bytes(
+                    &bytes,
+                    (geo.loader == geodata::GeoDataLoader::MemConservative).then_some(&allowed),
+                )
+                .map_err(anyhow::Error::msg)?
+            } else {
+                let reader = load_mmdb_mmap(geoip_path, "GeoIP", trigger)?;
+                meow_rules::country_index::CountryIndex::build(&reader, &allowed)
+                    .map_err(|e| anyhow::anyhow!("failed to build GeoIP country index: {e}"))?
+            };
             Some(Arc::new(index))
         }
         None => None,
@@ -1613,7 +1627,7 @@ fn build_parser_context_at(
         let loaded = meow_rules::geosite::discover_and_load_at(
             geosite_explicit,
             geosite_candidates,
-            Some(&allowed),
+            (geo.loader == geodata::GeoDataLoader::MemConservative).then_some(&allowed),
         );
         if loaded.is_some() {
             info!("Loaded geosite database");
@@ -1711,6 +1725,21 @@ fn collect_geosite_categories(lines: &[String]) -> std::collections::HashSet<Str
         }
     }
     out
+}
+
+fn dns_fallback_uses_geoip(raw: &raw::RawConfig) -> bool {
+    raw.dns.as_ref().is_some_and(|dns| {
+        dns.enable.unwrap_or(false)
+            && dns
+                .fallback
+                .as_ref()
+                .is_some_and(|servers| !servers.is_empty())
+            && dns
+                .fallback_filter
+                .as_ref()
+                .and_then(|filter| filter.geoip)
+                .unwrap_or(true)
+    })
 }
 
 fn dns_policy_uses_geosite(raw: &raw::RawConfig) -> bool {
@@ -1847,6 +1876,10 @@ fn collect_geo_scan_lines(
 /// then `$HOME/.config/meow`.
 pub fn default_geoip_path() -> PathBuf {
     meow_config_dir().join("Country.mmdb")
+}
+
+pub fn default_geoip_dat_path() -> PathBuf {
+    meow_config_dir().join("geoip.dat")
 }
 
 /// Default path for the GeoLite2-ASN MMDB. Same discovery chain as GeoIP,
@@ -2167,7 +2200,7 @@ async fn build_config(
 
     // Geodata config — parse and validate early so path errors surface before
     // anything tries to load the DBs.
-    let geodata = geodata::parse_geodata(raw.geodata.as_ref())?;
+    let geodata = geodata::parse_geodata_config(&raw)?;
 
     // General config
     let mode = raw
