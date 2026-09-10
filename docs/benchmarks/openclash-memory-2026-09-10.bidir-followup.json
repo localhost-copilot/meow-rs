@@ -1,0 +1,110 @@
+[
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 1,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 82.946,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 1,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 749.873,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 2,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 84.403,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 2,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 742.009,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 3,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 86.299,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 3,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 767.149,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 1,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 82.092,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 1,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 750.777,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 2,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 79.561,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 2,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 725.063,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 3,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 86.08,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 3,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 726.284,
+    "unit": "Mbit/s"
+  }
+]

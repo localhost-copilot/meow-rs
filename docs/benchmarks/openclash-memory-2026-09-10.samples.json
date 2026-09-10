@@ -1,0 +1,434 @@
+[
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 1,
+    "workload": "upload",
+    "streams": 4,
+    "value": 673.154,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 1,
+    "workload": "download",
+    "streams": 4,
+    "value": 764.624,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 1,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 77.938,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 1,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 691.267,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 2,
+    "workload": "upload",
+    "streams": 4,
+    "value": 668.444,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 2,
+    "workload": "download",
+    "streams": 4,
+    "value": 773.73,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 2,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 83.542,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 2,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 655.76,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 3,
+    "workload": "upload",
+    "streams": 4,
+    "value": 721.357,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 3,
+    "workload": "download",
+    "streams": 4,
+    "value": 864.079,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 3,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 85.763,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "after",
+    "round": 3,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 743.351,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 1,
+    "workload": "upload",
+    "streams": 4,
+    "value": 664.059,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 1,
+    "workload": "download",
+    "streams": 4,
+    "value": 772.455,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 1,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 85.326,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 1,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 667.305,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 2,
+    "workload": "upload",
+    "streams": 4,
+    "value": 675.298,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 2,
+    "workload": "download",
+    "streams": 4,
+    "value": 787.974,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 2,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 76.741,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 2,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 646.425,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 3,
+    "workload": "upload",
+    "streams": 4,
+    "value": 667.342,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 3,
+    "workload": "download",
+    "streams": 4,
+    "value": 765.635,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 3,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 73.08,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "A",
+    "engine": "before",
+    "round": 3,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 692.63,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 1,
+    "workload": "upload",
+    "streams": 4,
+    "value": 714.981,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 1,
+    "workload": "download",
+    "streams": 4,
+    "value": 815.645,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 1,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 83.134,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 1,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 738.353,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 2,
+    "workload": "upload",
+    "streams": 4,
+    "value": 707.916,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 2,
+    "workload": "download",
+    "streams": 4,
+    "value": 795.878,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 2,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 78.835,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 2,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 721.359,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 3,
+    "workload": "upload",
+    "streams": 4,
+    "value": 709.56,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 3,
+    "workload": "download",
+    "streams": 4,
+    "value": 815.893,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 3,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 78.744,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "after",
+    "round": 3,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 740.78,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 1,
+    "workload": "upload",
+    "streams": 4,
+    "value": 711.617,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 1,
+    "workload": "download",
+    "streams": 4,
+    "value": 821.197,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 1,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 83.683,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 1,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 737.733,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 2,
+    "workload": "upload",
+    "streams": 4,
+    "value": 710.422,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 2,
+    "workload": "download",
+    "streams": 4,
+    "value": 808.377,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 2,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 74.006,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 2,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 717.735,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 3,
+    "workload": "upload",
+    "streams": 4,
+    "value": 713.845,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 3,
+    "workload": "download",
+    "streams": 4,
+    "value": 828.986,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 3,
+    "workload": "bidir_upload",
+    "streams": 4,
+    "value": 83.492,
+    "unit": "Mbit/s"
+  },
+  {
+    "profile": "B",
+    "engine": "before",
+    "round": 3,
+    "workload": "bidir_download",
+    "streams": 4,
+    "value": 733.495,
+    "unit": "Mbit/s"
+  }
+]
