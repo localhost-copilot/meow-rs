@@ -87,7 +87,11 @@ pub async fn run(yaml: &str, mode: &str, container: &str) {
 }
 
 async fn workload(address: SocketAddr, mode: &str, container: &str) {
-    udp_counters(container, mode, "before").await;
+    if std::env::var("MEOW_BENCH_WORKLOAD").as_deref() == Ok("iperf3") {
+        iperf(address, mode, container).await;
+        return;
+    }
+    network_counters(container, mode, "before").await;
     let target: SocketAddr = "192.0.2.1:8080".parse().unwrap();
     // Establish the VPN and warm the persistent connection before recording
     // latency. TCP throughput below includes each new SOCKS flow's dial time.
@@ -216,6 +220,12 @@ async fn workload(address: SocketAddr, mode: &str, container: &str) {
             (count * 1200) as f64 / 1048576.0 / seconds
         );
     }
+    inspect_session(container, mode).await;
+    network_counters(container, mode, "after").await;
+    drop(control);
+}
+
+async fn inspect_session(container: &str, mode: &str) {
     // Query the live server's session description outside timed intervals.
     // This verifies DTLS without a forwarding hop or per-packet instrumentation.
     let status = tokio::process::Command::new("docker")
@@ -266,11 +276,103 @@ async fn workload(address: SocketAddr, mode: &str, container: &str) {
         "server DTLS session disagrees with requested mode"
     );
     println!("BENCH_TRANSPORT,{mode},direct-docker-port,server-dtls-session={dtls}");
-    udp_counters(container, mode, "after").await;
-    drop(control);
 }
 
-async fn udp_counters(container: &str, mode: &str, phase: &str) {
+async fn iperf(address: SocketAddr, mode: &str, container: &str) {
+    let samples: usize = std::env::var("MEOW_BENCH_IPERF_SAMPLES").map_or(3, |value| {
+        value.parse().expect("invalid iperf sample count")
+    });
+    assert!((1..=10).contains(&samples));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port().to_string();
+    // iperf3 has no SOCKS support. Forward both control and data TCP connections
+    // through the same SOCKS path for both kernels, including reverse transfers.
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(async move {
+        let mut flows = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (mut local, _) = accepted.unwrap();
+                    flows.spawn(async move {
+                        let (mut remote, _) = super::socks_target(address, 1, "192.0.2.1:5201".parse().unwrap()).await;
+                        tokio::io::copy_bidirectional(&mut local, &mut remote).await
+                    });
+                }
+                result = flows.join_next(), if !flows.is_empty() => {
+                    // iperf closes control/data connections independently;
+                    // a reset during teardown is harmless if its JSON succeeds.
+                    let _ = result.unwrap().unwrap();
+                }
+            }
+        }
+    });
+    let version = tokio::process::Command::new("iperf3")
+        .arg("--version")
+        .output()
+        .await
+        .unwrap();
+    assert!(version.status.success());
+    println!(
+        "BENCH_IPERF_VERSION,{}",
+        String::from_utf8_lossy(&version.stdout)
+            .lines()
+            .next()
+            .unwrap()
+    );
+    network_counters(container, mode, "before").await;
+    for reverse in [false, true] {
+        for concurrency in [1, 4] {
+            for sample in 1..=samples {
+                let mut command = tokio::process::Command::new("iperf3");
+                command.args([
+                    "-c",
+                    "127.0.0.1",
+                    "-p",
+                    &port,
+                    "-P",
+                    &concurrency.to_string(),
+                    "-t",
+                    "10",
+                    "-O",
+                    "2",
+                    "-J",
+                ]);
+                if reverse {
+                    command.arg("-R");
+                }
+                let output = command.kill_on_drop(true).output().await.unwrap();
+                assert!(
+                    output.status.success(),
+                    "iperf3 failed: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert!(report.get("error").is_none(), "iperf3 error: {report}");
+                let rate = report["end"]["sum_received"]["bits_per_second"]
+                    .as_f64()
+                    .unwrap();
+                assert!(rate > 0.0);
+                println!(
+                    "BENCH_IPERF,{mode},{reverse},{concurrency},{sample},{:.3}",
+                    rate / 1_000_000.0
+                );
+                println!("BENCH_IPERF_JSON,{mode},{reverse},{concurrency},{sample},{report}");
+                network_counters(
+                    container,
+                    mode,
+                    &format!("iperf-{reverse}-{concurrency}-{sample}"),
+                )
+                .await;
+            }
+        }
+    }
+    inspect_session(container, mode).await;
+    network_counters(container, mode, "after").await;
+}
+
+async fn network_counters(container: &str, mode: &str, phase: &str) {
     let output = tokio::process::Command::new("docker")
         .args(["exec", container, "cat", "/proc/net/snmp"])
         .output()
@@ -280,9 +382,12 @@ async fn udp_counters(container: &str, mode: &str, phase: &str) {
     for line in String::from_utf8(output.stdout)
         .unwrap()
         .lines()
-        .filter(|line| line.starts_with("Udp:"))
+        .filter(|line| {
+            line.starts_with("Udp:") || line.starts_with("Tcp:") || line.starts_with("Ip:")
+        })
     {
-        println!("BENCH_SERVER_UDP,{mode},{phase},{line}");
+        let protocol = line.split(':').next().unwrap().to_ascii_uppercase();
+        println!("BENCH_SERVER_{protocol},{mode},{phase},{line}");
     }
 }
 

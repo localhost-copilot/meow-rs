@@ -1,4 +1,4 @@
-use crate::{closed, device::RawIp, Flow, Packet, MAX_SOCKETS, SOCKET_BUFFER};
+use crate::{closed, device::RawIp, Flow, Packet, MAX_SOCKETS, SOCKET_BUFFER, TCP_SOCKET_BUFFER};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::socket::{tcp, udp};
 use smoltcp::time::{Duration as SmolDuration, Instant as SmolInstant};
@@ -154,11 +154,12 @@ impl Driver {
                 ready,
             } => {
                 let mut socket = tcp::Socket::new(
-                    tcp::SocketBuffer::new(vec![0; SOCKET_BUFFER]),
-                    tcp::SocketBuffer::new(vec![0; SOCKET_BUFFER]),
+                    tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER]),
+                    tcp::SocketBuffer::new(vec![0; TCP_SOCKET_BUFFER]),
                 );
                 socket.set_timeout(Some(SmolDuration::from_secs(30)));
                 socket.set_nagle_enabled(false);
+                socket.set_congestion_control(tcp::CongestionControl::Cubic);
                 if socket
                     .connect(
                         self.iface.context(),
@@ -259,8 +260,14 @@ impl Driver {
                 })
                 .count()
                 .max(1);
-            let tcp_send_limit =
-                (self.tcp_send_budget / tcp_flows).clamp(self.device.mtu, SOCKET_BUFFER);
+            let tcp_send_limit = (self.tcp_send_budget / tcp_flows).clamp(
+                self.device.mtu,
+                if self.tcp_send_budget == usize::MAX {
+                    TCP_SOCKET_BUFFER
+                } else {
+                    SOCKET_BUFFER
+                },
+            );
             let tcp_total_limit = self.tcp_send_budget.max(tcp_flows * self.device.mtu);
             // All bridge and channel wakers are registered in this same select.
             // A full packet sink never blocks command handling or tunnel reads.
@@ -270,9 +277,24 @@ impl Driver {
                 _ = tokio::time::sleep(delay) => {},
                 command = self.commands.recv() => self.register(command.ok_or_else(closed)?),
                 packet = incoming.recv(), if self.device.incoming.len() < 64 => {
-                    let packet = packet.ok_or_else(closed)?;
-                    if packet.len() > self.device.mtu { return Err(io::Error::new(io::ErrorKind::InvalidData, "incoming IP packet exceeds MTU")); }
-                    self.device.incoming.push_back(packet);
+                    // Let the IP stack process a short ready batch before
+                    // emitting ACKs, without waiting or starving control work.
+                    // A data packet can also acknowledge our outgoing TCP data.
+                    // Preserve that ACK clock while any TCP sender has data queued.
+                    let sending = self.entries.iter().any(|entry| {
+                        matches!(entry.socket, Socket::Tcp(_))
+                            && self.sockets.get::<tcp::Socket>(entry.handle).send_queue() != 0
+                    });
+                    let mut next = Some(packet.ok_or_else(closed)?);
+                    while let Some(packet) = next {
+                        if packet.len() > self.device.mtu { return Err(io::Error::new(io::ErrorKind::InvalidData, "incoming IP packet exceeds MTU")); }
+                        // Small ACK/control packets release send credits and
+                        // should reach the stack without further coalescing.
+                        let small = packet.len() <= 128;
+                        self.device.incoming.push_back(packet);
+                        if sending || small || self.device.incoming.len() >= 8 { break; }
+                        next = incoming.try_recv().ok();
+                    }
                 },
                 permit = outgoing.reserve(), if !self.device.outgoing.is_empty() => {
                     permit.map_err(|_| closed())?.send(self.device.outgoing.pop_front().expect("nonempty queue"));
@@ -412,9 +434,9 @@ fn pump_tcp(
     {
         let capacity = (send_limit - socket.send_queue())
             .min(*send_available)
-            .min(8192);
-        let mut scratch = [0; 8192];
-        let mut buffer = ReadBuf::new(&mut scratch[..capacity]);
+            .min(SOCKET_BUFFER);
+        let mut scratch = [std::mem::MaybeUninit::uninit(); SOCKET_BUFFER];
+        let mut buffer = ReadBuf::uninit(&mut scratch[..capacity]);
         match Pin::new(&mut entry.bridge).poll_read(cx, &mut buffer) {
             Poll::Ready(Ok(())) => {
                 if buffer.filled().is_empty() {

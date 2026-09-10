@@ -370,7 +370,7 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
         // Share a burst budget across flows into the datagram carrier. Larger windows
         // overflow ocserv's UDP receive buffer under concurrent TCP traffic,
         // and smoltcp's loss recovery can then dominate the transfer time.
-        32 * 1024
+        64 * 1024
     } else {
         tcp_send_budget
     };

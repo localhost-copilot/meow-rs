@@ -207,7 +207,7 @@ flowchart TD
 
 ### Build
 
-Requires Rust 1.88+ (the workspace pins `rust-version = "1.88"` and CI enforces it via a dedicated MSRV job).
+Requires Rust 1.91+ (the workspace pins `rust-version = "1.91"` and CI enforces it via a dedicated MSRV job).
 
 ```bash
 cargo build --release

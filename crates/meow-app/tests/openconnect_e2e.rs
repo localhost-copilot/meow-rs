@@ -127,7 +127,14 @@ async fn independent_ocserv_require_fails_sockets_when_udp_is_blocked() {
 #[allow(clippy::assertions_on_constants)] // Compile in debug test suites, refuse debug measurements.
 async fn benchmark_real_ocserv_tls_dtls() {
     assert!(!cfg!(debug_assertions), "benchmark requires --release");
+    let selected = std::env::var("MEOW_BENCH_MODE").ok();
+    assert!(selected
+        .as_deref()
+        .is_none_or(|mode| matches!(mode, "off" | "require")));
     for mode in ["off", "require"] {
+        if selected.as_deref().is_some_and(|selected| selected != mode) {
+            continue;
+        }
         ocserv_roundtrip(mode, false, true).await;
     }
 }
@@ -146,7 +153,14 @@ async fn ocserv_roundtrip(mode: &str, fault: bool, measure: bool) {
                 .status();
         }
     }
-    tokio::time::timeout(Duration::from_secs(if measure { 300 } else { 90 }), async {
+    let timeout = if measure && std::env::var("MEOW_BENCH_WORKLOAD").as_deref() == Ok("iperf3") {
+        600 // Up to ten samples of four 12-second transfers per mode.
+    } else if measure {
+        300
+    } else {
+        90
+    };
+    tokio::time::timeout(Duration::from_secs(timeout), async {
         let fixture = tempfile::tempdir().unwrap();
         let mount = format!("{}:/fixture", fixture.path().display());
         let relay = udp_fault_relay::Relay::new().await;

@@ -267,6 +267,8 @@ async fn dropping_cancelled_connect_releases_stack() {
 #[tokio::test]
 async fn new_flow_waits_for_send_credits_held_by_existing_flow() {
     tokio::time::timeout(Duration::from_secs(5), async {
+        let hold = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hold_replies = std::sync::Arc::clone(&hold);
         let (outgoing, mut packets) = mpsc::channel::<Vec<u8>>(4);
         let (to_peer, peer_in) = mpsc::channel(4);
         let (peer_out, mut replies) = mpsc::channel::<Vec<u8>>(4);
@@ -296,7 +298,7 @@ async fn new_flow_waits_for_send_credits_held_by_existing_flow() {
                     if offset >= 0 {
                         let offset = offset as usize;
                         let end = offset + tcp.payload().len();
-                        assert!(end <= 32768);
+                        assert!(end <= 65536);
                         covered.resize(covered.len().max(end), false);
                         for byte in &mut covered[offset..end] {
                             if !*byte {
@@ -306,7 +308,7 @@ async fn new_flow_waits_for_send_credits_held_by_existing_flow() {
                         }
                     }
                     total_tx.send_replace(total);
-                    if total > 16384 && !*outgoing_released.borrow() {
+                    if total > 32768 + 16384 && !*outgoing_released.borrow() {
                         if let Some(signal) = exceeded.take() {
                             let _ = signal.send(());
                         }
@@ -336,7 +338,7 @@ async fn new_flow_waits_for_send_credits_held_by_existing_flow() {
                         let ip = smoltcp::wire::Ipv4Packet::new_checked(&packet[..]).unwrap();
                         let tcp = smoltcp::wire::TcpPacket::new_checked(ip.payload()).unwrap();
                         // New handshakes remain possible while data ACKs are held.
-                        if open || tcp.syn() {
+                        if open || tcp.syn() || !hold_replies.load(std::sync::atomic::Ordering::SeqCst) {
                             if to_stack.send(packet).await.is_err() { break; }
                         } else { held.push(packet); }
                     }
@@ -354,8 +356,14 @@ async fn new_flow_waits_for_send_credits_held_by_existing_flow() {
         .unwrap();
         let target = SocketAddr::new(peer::ADDRESS.into(), peer::TCP_PORT);
         let mut first = stack.connect(target).await.unwrap();
+        // Grow the congestion window before withholding ACKs to isolate the budget.
+        first.write_all(&vec![7; 32768]).await.unwrap();
+        let mut warmup = vec![0; 32768];
+        first.read_exact(&mut warmup).await.unwrap();
+        assert_eq!(warmup, vec![7; 32768]);
+        hold.store(true, std::sync::atomic::Ordering::SeqCst);
         first.write_all(&vec![11; 16384]).await.unwrap();
-        total_rx.wait_for(|total| *total >= 16384).await.unwrap();
+        total_rx.wait_for(|total| *total >= 32768 + 16384).await.unwrap();
         let mut second = stack.connect(target).await.unwrap();
         second.write_all(&vec![22; 8192]).await.unwrap();
         // With ACKs withheld, admitting the new flow must not exceed the total

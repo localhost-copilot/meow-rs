@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 type Packet = (Vec<u8>, SocketAddr);
 type Failure = Arc<Mutex<Option<String>>>;
 const SOCKET_BUFFER: usize = 32768;
+const TCP_SOCKET_BUFFER: usize = 128 * 1024;
 const MAX_SOCKETS: usize = 1024;
 
 fn closed() -> io::Error {
@@ -72,8 +73,8 @@ impl Stack {
     }
 
     /// Share a soft TCP send budget across open flows. Each flow may queue at
-    /// least one MTU and at most 32 KiB; already queued bytes drain normally
-    /// when new flows reduce its share. Socket buffers remain 32 KiB in each
+    /// least one MTU and at most 32 KiB with a finite budget. Already queued bytes
+    /// drain normally when new flows reduce its share. TCP buffers are 128 KiB in each
     /// direction. A finite budget bounds bursts but can limit throughput on
     /// paths with a large bandwidth-delay product; `usize::MAX` disables it.
     /// Address/MTU validation follows [`Self::with_addresses`]; requires Tokio.

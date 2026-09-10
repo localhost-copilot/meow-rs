@@ -107,4 +107,5 @@ for server in [http.server.ThreadingHTTPServer(("0.0.0.0", 8081), HttpHandler),
 
 subprocess.Popen(["dnsmasq", "--no-daemon", "--no-resolv", "--no-hosts",
                   "--address=/service.vpn.test/192.0.2.1", "--address=/ipv6.vpn.test/2001:db8::1"])
+subprocess.Popen(["iperf3", "-s"])
 subprocess.run(["ocserv", "-f", "-d", "1", "-c", "/run/ocserv.conf"], check=True)
