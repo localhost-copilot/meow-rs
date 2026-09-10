@@ -87,12 +87,11 @@ where
 
 /// `geodata:` YAML subsection — path overrides, download URLs, auto-update.
 ///
-/// Fields `geodata-mode`, `geodata-loader`, and `geoip-matcher` exist in
-/// upstream Go mihomo but are not meaningful here. They are accepted and
-/// produce a `warn!` (Class B per ADR-0002, forward-compat).
+/// Top-level mihomo fields take precedence over corresponding nested aliases.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawGeoDataConfig {
+    pub geoip_path: Option<String>,
     /// Explicit path to GeoIP Country MMDB. Skips discovery chain when set.
     pub mmdb_path: Option<String>,
     /// Explicit path to GeoLite2-ASN MMDB. Skips discovery chain when set.
@@ -107,7 +106,7 @@ pub struct RawGeoDataConfig {
     pub auto_update_interval: Option<u32>,
     /// Download URL overrides. Defaults baked in when absent.
     pub url: Option<RawGeoDataUrls>,
-    // Upstream-only fields accepted for forward-compat; we warn-once and ignore.
+    // Legacy nested aliases; the top-level forms are typed in RawConfig.
     pub geodata_mode: Option<serde_yaml::Value>,
     pub geodata_loader: Option<serde_yaml::Value>,
     pub geoip_matcher: Option<serde_yaml::Value>,
@@ -117,6 +116,7 @@ pub struct RawGeoDataConfig {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawGeoDataUrls {
+    pub geoip: Option<String>,
     pub mmdb: Option<String>,
     pub asn: Option<String>,
     pub geosite: Option<String>,
@@ -125,6 +125,11 @@ pub struct RawGeoDataUrls {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawConfig {
+    pub geodata_mode: Option<bool>,
+    pub geodata_loader: Option<String>,
+    pub geo_auto_update: Option<bool>,
+    pub geo_update_interval: Option<u32>,
+    pub geox_url: Option<RawGeoDataUrls>,
     pub find_process_mode: Option<meow_common::process_lookup::FindProcessMode>,
     pub tcp_concurrent: Option<bool>,
     pub unified_delay: Option<bool>,

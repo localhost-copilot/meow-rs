@@ -88,6 +88,10 @@ impl CountryKey {
 }
 
 impl CountryIndex {
+    pub(crate) fn from_ranges(by_country: HashMap<String, CountryRanges>) -> Self {
+        Self { by_country }
+    }
+
     /// Walk every record in `reader` and bin each network into the
     /// matching country bucket — but only for ISO codes present in
     /// `allowed`. Codes outside the allowlist are skipped during the walk
