@@ -163,7 +163,7 @@ pub async fn parse_dns(
     let mut resolver = Resolver::new_with_bootstrap_with_proxies(
         main_urls,
         fallback_urls,
-        default_ns_urls,
+        default_ns_urls.clone(),
         mode,
         hosts,
         use_hosts,
@@ -176,6 +176,30 @@ pub async fn parse_dns(
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     resolver.set_cache_algorithm(cache_algorithm);
+
+    let direct_urls = parse_nameserver_entries(dns.direct_nameserver.as_deref().unwrap_or(&[]))?;
+    if !direct_urls.is_empty() {
+        let mut direct_hosts = build_hosts_trie(raw.hosts.as_ref())?;
+        if use_hosts && use_system_hosts {
+            merge_system_hosts(&mut direct_hosts).await;
+        }
+        let mut direct = Resolver::new_with_bootstrap_with_proxies(
+            direct_urls,
+            vec![],
+            default_ns_urls,
+            DnsMode::Normal,
+            direct_hosts,
+            use_hosts,
+            dns.ipv6.unwrap_or(false),
+            None,
+            None,
+            proxy_registry,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("direct-nameserver: {e}"))?;
+        direct.set_cache_algorithm(cache_algorithm);
+        resolver.set_direct_resolver(direct, dns.direct_nameserver_follow_policy.unwrap_or(false));
+    }
 
     // Fake-IP wiring: only when enhanced-mode == fake-ip. Errors here are
     // fatal (Class A per ADR-0002) — a misconfigured fake-IP range would
@@ -899,6 +923,82 @@ fn normalize_hosts_wildcard(s: &str) -> String {
 mod tests {
     use super::*;
     use std::net::Ipv4Addr;
+
+    async fn answer_server(ip: Ipv4Addr) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        use hickory_proto::op::{Message, MessageType, OpCode};
+        use hickory_proto::rr::{rdata::A, RData, Record};
+        use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            while let Ok((n, peer)) = socket.recv_from(&mut buf).await {
+                let query = Message::from_bytes(&buf[..n]).unwrap();
+                let q = query.queries[0].clone();
+                let mut response =
+                    Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+                response.metadata.recursion_available = true;
+                response.add_query(q.clone());
+                response.add_answer(Record::from_rdata(q.name, 60, RData::A(A(ip))));
+                socket
+                    .send_to(&response.to_bytes().unwrap(), peer)
+                    .await
+                    .unwrap();
+            }
+        });
+        (addr, task)
+    }
+
+    #[tokio::test]
+    async fn direct_dns_reresolves_tcp_and_udp_and_optionally_follows_policy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (main, main_task) = answer_server(Ipv4Addr::new(192, 0, 2, 1)).await;
+        let (direct, direct_task) = answer_server(Ipv4Addr::LOCALHOST).await;
+        let (policy, policy_task) = answer_server(Ipv4Addr::new(192, 0, 2, 3)).await;
+        for follow in [false, true] {
+            let config = crate::load_config_from_str(&format!("dns:\n  enable: true\n  enhanced-mode: fake-ip\n  nameserver: [{main}]\n  direct-nameserver: [{direct}]\n  direct-nameserver-follow-policy: {follow}\n  nameserver-policy:\n    '+.policy.example': [{policy}]\n")).await.unwrap();
+            let adapter = &config.proxies["DIRECT"];
+            let mut metadata = meow_common::Metadata {
+                host: "base.example".into(),
+                dst_ip: Some("192.0.2.99".parse().unwrap()),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let resolved = adapter
+                .resolve_udp_destination(&metadata)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(resolved.address.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+            metadata.host = "sub.policy.example".into();
+            let resolved = adapter
+                .resolve_udp_destination(&metadata)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                resolved.address.ip().to_string(),
+                if follow { "192.0.2.3" } else { "127.0.0.1" }
+            );
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            metadata.dst_port = listener.local_addr().unwrap().port();
+            metadata.host = "base.example".into();
+            let mut client =
+                tokio::time::timeout(Duration::from_secs(2), adapter.dial_tcp(&metadata))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let (mut server, _) = listener.accept().await.unwrap();
+            client.write_all(b"direct-dns").await.unwrap();
+            let mut received = [0u8; 10];
+            server.read_exact(&mut received).await.unwrap();
+            assert_eq!(&received, b"direct-dns");
+        }
+        for task in [main_task, direct_task, policy_task] {
+            task.abort();
+        }
+    }
 
     #[tokio::test]
     async fn dns_ipv6_controls_answers_independently_of_outbound_ipv6() {

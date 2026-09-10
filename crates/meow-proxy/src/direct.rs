@@ -16,6 +16,7 @@ pub struct DirectAdapter {
     /// important when meow-rs *is* the system DNS, because routing a direct
     /// DNS query back through the OS would loop the query back into meow-rs.
     resolver: Option<Arc<Resolver>>,
+    resolve_again: bool,
     /// Wall-clock bound on `TcpStream::connect`. iOS / macOS scoped-routing
     /// and reachability-cache transients can leave a `connect()` hanging
     /// indefinitely against a destination whose route is in flux (Wi-Fi
@@ -34,6 +35,7 @@ impl DirectAdapter {
             compatible: false,
             routing_mark: None,
             resolver: None,
+            resolve_again: false,
             connect_timeout: None,
             health: ProxyHealth::new(),
         }
@@ -51,7 +53,8 @@ impl DirectAdapter {
     }
 
     pub fn with_resolver(mut self, resolver: Arc<Resolver>) -> Self {
-        self.resolver = Some(resolver);
+        self.resolve_again = resolver.direct_resolver().is_some();
+        self.resolver = Some(resolver.direct_resolver().cloned().unwrap_or(resolver));
         self
     }
 
@@ -78,7 +81,10 @@ impl DirectAdapter {
     async fn resolve_targets(&self, metadata: &Metadata) -> Result<Vec<SocketAddr>> {
         // 1. Destination already resolved (e.g. by rule-matching pre_resolve,
         //    or when the client supplied an IP literal).
-        if let Some(ip) = metadata.dst_ip {
+        if let Some(ip) = metadata
+            .dst_ip
+            .filter(|_| !self.resolve_again || metadata.host.is_empty())
+        {
             return Ok(vec![SocketAddr::new(ip, metadata.dst_port)]);
         }
 
@@ -337,6 +343,20 @@ impl ProxyAdapter for DirectAdapter {
             .await
             .map_err(MeowError::Io)?;
         Ok(Box::new(DirectPacketConn(socket)))
+    }
+
+    async fn resolve_udp_destination(
+        &self,
+        metadata: &Metadata,
+    ) -> Result<Option<meow_common::adapter::ResolvedUdpDestination>> {
+        if !self.resolve_again || metadata.host.is_empty() {
+            return Ok(None);
+        }
+        let targets = self.resolve_targets(metadata).await?;
+        Ok(Some(meow_common::adapter::ResolvedUdpDestination {
+            address: targets[0],
+            outbound: None,
+        }))
     }
 
     /// Pass the stream through unchanged.
