@@ -17,9 +17,15 @@ archive and preserve the local changes described here.
 
 At import, protocol behavior is unchanged from upstream. The manifest
 uses workspace package metadata, removes unused example/test dependencies,
-and the library root adds an introductory rustdoc paragraph. Three equivalent
-style changes satisfy current Clippy: TCP keepalive initialization, DHCP DNS
-address chunk iteration, and IEEE 802.15.4 optional PAN ID matching.
+and the library root adds an introductory rustdoc paragraph. Equivalent style
+changes satisfy current Clippy: TCP keepalive initialization, DHCP DNS address
+chunk iteration, IEEE 802.15.4 optional PAN ID matching, and the test hardware
+address selection under different feature combinations.
+
+Default features match the IPv4/IPv6 TCP/UDP IP-only stack used by
+`meow-netstack`. This prevents a workspace-wide build from enabling additional
+protocols in the application through Cargo feature unification. Other upstream
+features remain available explicitly; the measured-RTO policy remains opt-in.
 
 ## TCP recovery changes
 
