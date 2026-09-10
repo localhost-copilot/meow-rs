@@ -13,6 +13,7 @@ pub struct UrlTestGroup {
     name: SmolStr,
     static_proxies: Vec<Arc<dyn Proxy>>,
     provider_slots: Vec<ProviderSlot>,
+    empty_fallback: Option<Arc<dyn Proxy>>,
     tolerance: u16,
     /// User-fixed member. This is independent from `fastest`, which remains
     /// the automatic URL-test incumbent.
@@ -35,6 +36,7 @@ impl UrlTestGroup {
             name: SmolStr::from(name),
             static_proxies: proxies,
             provider_slots: Vec::new(),
+            empty_fallback: None,
             tolerance,
             fixed: RwLock::new(None),
             store: None,
@@ -57,6 +59,7 @@ impl UrlTestGroup {
             name: SmolStr::from(name),
             static_proxies: proxies,
             provider_slots: slots,
+            empty_fallback: None,
             tolerance,
             fixed: RwLock::new(None),
             store: None,
@@ -67,6 +70,12 @@ impl UrlTestGroup {
             usage: UsageTracker::new(),
             dial_failures: DialFailureTracker::new(),
         }
+    }
+
+    /// Use this leaf proxy only while all configured members are absent.
+    pub fn with_empty_fallback(mut self, proxy: Arc<dyn Proxy>) -> Self {
+        self.empty_fallback = Some(proxy);
+        self
     }
 
     #[must_use]
@@ -88,6 +97,17 @@ impl UrlTestGroup {
     }
 
     fn contains_name(&self, name: &str) -> bool {
+        if self.static_proxies.is_empty()
+            && self
+                .provider_slots
+                .iter()
+                .all(|slot| slot.read().is_empty())
+        {
+            return self
+                .empty_fallback
+                .as_ref()
+                .is_some_and(|proxy| proxy.name() == name);
+        }
         self.static_proxies.iter().any(|p| p.name() == name)
             || self.provider_slots.iter().any(|slot| {
                 let guard = slot.read();
@@ -123,6 +143,11 @@ impl UrlTestGroup {
     /// scanned again to read the current proxy's delay/aliveness; then
     /// `fastest_proxy` cloned the Vec a second time to look up by name.
     fn pick_for_dial(&self) -> Option<Arc<dyn Proxy>> {
+        self.pick_for_dial_member()
+            .or_else(|| self.empty_fallback.clone())
+    }
+
+    fn pick_for_dial_member(&self) -> Option<Arc<dyn Proxy>> {
         if let Some(proxy) = self.fixed_proxy_if_alive() {
             return Some(proxy);
         }
@@ -187,6 +212,11 @@ impl UrlTestGroup {
     /// the REST/info methods below.  No Vec allocation; falls back to the
     /// first proxy if `fastest` is unset or names something no longer present.
     fn fastest_proxy(&self) -> Option<Arc<dyn Proxy>> {
+        self.fastest_proxy_member()
+            .or_else(|| self.empty_fallback.clone())
+    }
+
+    fn fastest_proxy_member(&self) -> Option<Arc<dyn Proxy>> {
         if let Some(proxy) = self.fixed_proxy_if_alive() {
             return Some(proxy);
         }
@@ -237,6 +267,11 @@ impl UrlTestGroup {
             let guard = slot.read();
             for p in guard.iter() {
                 out.push(p.name().to_string());
+            }
+        }
+        if out.is_empty() {
+            if let Some(proxy) = &self.empty_fallback {
+                out.push(proxy.name().to_string());
             }
         }
         out

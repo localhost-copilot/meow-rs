@@ -4,6 +4,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AdapterType {
     Direct,
+    Compatible,
     Reject,
     RejectDrop,
     Selector,
@@ -27,6 +28,7 @@ impl fmt::Display for AdapterType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AdapterType::Direct => write!(f, "Direct"),
+            AdapterType::Compatible => write!(f, "Compatible"),
             AdapterType::Reject => write!(f, "Reject"),
             AdapterType::RejectDrop => write!(f, "RejectDrop"),
             AdapterType::Selector => write!(f, "Selector"),
