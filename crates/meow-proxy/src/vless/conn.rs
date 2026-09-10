@@ -16,7 +16,6 @@ use meow_common::{MeowError, ProxyConn, ProxyPacketConn, Result};
 use meow_transport::Stream;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 
-#[cfg(feature = "mux")]
 use super::header::encode_mux_request;
 use super::header::{encode_request, Cmd, VlessAddr};
 
@@ -114,7 +113,6 @@ impl VlessConn {
     ///
     /// Used by the Mux.Cool session dialer
     /// (`VlessAdapter::with_mux` with `protocol: muxcool`).
-    #[cfg(feature = "mux")]
     pub async fn new_mux(
         mut stream: Box<dyn Stream>,
         uuid_bytes: &[u8; 16],
@@ -138,7 +136,7 @@ impl VlessConn {
     /// Deferred variant of `Self::new_mux` for Vision: the Mux request
     /// header rides inside the first Vision record together with the first
     /// Mux.Cool frame (xray expects the request inside the first record).
-    #[cfg(feature = "mux")]
+    #[cfg(feature = "vless-vision")]
     pub async fn new_mux_deferred(
         stream: Box<dyn Stream>,
         uuid_bytes: &[u8; 16],

@@ -22,7 +22,7 @@
 //! | D14 | `parse_vless_encryption_non_none_hard_errors`    — encryption: aes-128-gcm → hard error |
 //! | D15 | `parse_vless_encryption_empty_string_accepted`   — encryption: "" → ok |
 //! | D16 | `parse_vless_mux_enabled_loads_with_sing_mux`   — smux loads (h2mux default) |
-//! | D17 | `parse_vless_vision_udp_true_warns_once`         — vision + udp warns + loads |
+//! | D17 | `vless_yaml_defaults_to_xudp_with_per_packet_destinations` — UDP wire compatibility |
 //! | D18 | `parse_vless_uuid_hex_and_dashed_both_accepted`  — both UUID forms ok |
 //! | D19 | `parse_vless_uuid_invalid_hard_errors`           — bad uuid → hard error |
 //! | D20 | `parse_vless_server_domain_over_255_errors`      — server > 255 bytes → hard error |
@@ -1308,41 +1308,66 @@ proxies:
     );
 }
 
-// ─── D17: vision + udp: true → warn + loads ──────────────────────────────────
-
-/// D17: `parse_vless_vision_udp_true_warns_once`
-///
-/// `flow: "xtls-rprx-vision"` + `udp: true` + `tls: true` → parse succeeds;
-/// at least one warn mentioning both "UDP" and "Vision" (or lowercase equivalents).
-/// Class B per ADR-0002 row #7: Vision is TCP-only; UDP uses plain VLESS.
-/// NOT hard-error: crypto and routing are unchanged on the UDP path.
-/// upstream: upstream UDP also silently uses plain VLESS; we warn once at load.
+/// VLESS YAML defaults to XUDP: the request is CommandMux and each
+/// datagram keeps its own target, rather than dropping the configured flow
+/// into the legacy single-destination UDP command.
 #[tokio::test]
-async fn parse_vless_vision_udp_true_warns_once() {
-    let yaml = r#"
+async fn vless_yaml_defaults_to_xudp_with_per_packet_destinations() {
+    use meow_common::{Metadata, Network};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let peer = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0; 19];
+        stream.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request[17..], &[0, 3]);
+        for (status, ip) in [(1, 1), (2, 2)] {
+            let mut packet = [0; 20];
+            stream.read_exact(&mut packet).await.unwrap();
+            assert_eq!(&packet[..10], &[0, 12, 0, 0, status, 1, 2, 0, 53, 1]);
+            assert_eq!(&packet[10..14], &[192, 0, 2, ip]);
+            assert_eq!(&packet[14..], b"\x00\x04ping");
+            if status == 1 {
+                stream.write_all(&[0, 0]).await.unwrap();
+            }
+            packet[4] = 2;
+            stream.write_all(&packet).await.unwrap();
+        }
+    });
+    let yaml = format!(
+        r#"
 proxies:
   - name: v
     type: vless
-    server: example.com
-    port: 443
+    server: 127.0.0.1
+    port: {port}
     uuid: b831381d-6324-4d53-ad4f-8cda48b30811
-    tls: true
-    flow: "xtls-rprx-vision"
     udp: true
-"#;
-    let (result, lines) = with_warn_capture_async(load_config_from_str(yaml)).await;
-    result.expect("vision + udp must not be a hard error");
-    let warn_count = lines
-        .iter()
-        .filter(|l| {
-            l.contains("WARN")
-                && (l.to_lowercase().contains("udp") || l.to_lowercase().contains("vision"))
-        })
-        .count();
-    assert!(
-        warn_count >= 1,
-        "at least one WARN about UDP/Vision must be emitted; captured lines: {lines:?}"
+"#
     );
+    let config = load_config_from_str(&yaml).await.unwrap();
+    let metadata = Metadata {
+        network: Network::Udp,
+        dst_ip: Some("192.0.2.1".parse().unwrap()),
+        dst_port: 53,
+        ..Default::default()
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let conn = config.proxies["v"].dial_udp(&metadata).await.unwrap();
+        for target in ["192.0.2.1:53", "192.0.2.2:53"] {
+            let destination = target.parse().unwrap();
+            conn.write_packet(b"ping", &destination).await.unwrap();
+            let mut data = [0; 16];
+            let (n, source) = conn.read_packet(&mut data).await.unwrap();
+            assert_eq!(&data[..n], b"ping");
+            assert_eq!(source, destination);
+        }
+        peer.await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 // ─── D18: UUID dashed and hex-only both accepted ──────────────────────────────

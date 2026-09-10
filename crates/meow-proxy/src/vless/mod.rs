@@ -8,6 +8,7 @@
 
 pub(crate) mod conn;
 pub(crate) mod header;
+pub(crate) mod xudp;
 
 #[cfg(feature = "vless-vision")]
 pub(crate) mod vision;
