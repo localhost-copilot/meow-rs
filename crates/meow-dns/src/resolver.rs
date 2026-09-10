@@ -115,9 +115,13 @@ impl Default for NameserverPolicy {
 
 impl NameserverPolicy {
     fn set_proxy_lookup(&self, lookup: &crate::client::ProxyLookup) {
+        self.for_each_client(&|client| client.set_proxy_lookup(Arc::clone(lookup)));
+    }
+
+    fn for_each_client(&self, visit: &impl Fn(&DnsClient)) {
         let update = |entry: &PolicyEntry| {
             for client in &entry.nameservers {
-                client.set_proxy_lookup(Arc::clone(lookup));
+                visit(client);
             }
         };
         self.exact.values().for_each(update);
@@ -603,6 +607,17 @@ async fn query_pool_generic(
 }
 
 impl Resolver {
+    /// Apply routing rules to main/fallback/policy upstreams without explicit tags.
+    /// A tunnel must install a live lookup before these clients can dial.
+    pub fn enable_rule_routing(&self) {
+        for client in self.main.iter().chain(self.fallback.iter().flatten()) {
+            client.enable_rule_routing();
+        }
+        if let Some(policy) = &self.policy {
+            policy.for_each_client(&DnsClient::enable_rule_routing);
+        }
+    }
+
     /// Keep named DNS outbounds synchronized with configuration and group changes.
     pub fn set_proxy_lookup(&self, lookup: crate::client::ProxyLookup) {
         for client in self.main.iter().chain(self.fallback.iter().flatten()) {

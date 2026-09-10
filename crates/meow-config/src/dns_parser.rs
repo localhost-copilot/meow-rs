@@ -69,6 +69,9 @@ pub async fn parse_dns(
         parse_nameserver_entries(dns.default_nameserver.as_deref().unwrap_or(&[]))?;
     let proxy_ns_urls =
         parse_nameserver_entries(dns.proxy_server_nameserver.as_deref().unwrap_or(&[]))?;
+    if dns.respect_rules.unwrap_or(false) && proxy_ns_urls.is_empty() {
+        anyhow::bail!("dns.respect-rules requires a non-empty proxy-server-nameserver");
+    }
 
     let mode = match dns.enhanced_mode.as_deref() {
         Some("fake-ip") => DnsMode::FakeIp,
@@ -176,6 +179,9 @@ pub async fn parse_dns(
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     resolver.set_cache_algorithm(cache_algorithm);
+    if dns.respect_rules.unwrap_or(false) {
+        resolver.enable_rule_routing();
+    }
 
     let direct_urls = parse_nameserver_entries(dns.direct_nameserver.as_deref().unwrap_or(&[]))?;
     if !direct_urls.is_empty() {

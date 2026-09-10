@@ -148,7 +148,13 @@ pub type DnsProxy = Arc<dyn meow_common::Proxy>;
 
 /// Resolve a configured outbound against the current routing snapshot.
 /// Implementations should capture weak references to avoid resolver/proxy cycles.
-pub type ProxyLookup = Arc<dyn Fn(&str) -> Option<DnsProxy> + Send + Sync>;
+pub type ProxyLookup = Arc<
+    dyn Fn(&str, &meow_common::Metadata) -> Option<Arc<dyn meow_common::ProxyAdapter>>
+        + Send
+        + Sync,
+>;
+type RoutedProxy = Arc<dyn meow_common::ProxyAdapter>;
+pub const RULES_OUTBOUND: &str = "RULES";
 
 enum ProxyBinding {
     Fixed(DnsProxy),
@@ -357,9 +363,8 @@ impl DnsClient {
     /// When set:
     /// - TCP / DoT / DoH exchanges use `proxy.dial_tcp` instead of opening
     ///   a direct TCP connection.
-    /// - UDP exchanges fall through to TCP-over-proxy, since most proxy
-    ///   adapters can't relay arbitrary UDP. The fallback matches the
-    ///   semantics in ADR-0012.
+    /// - UDP exchanges use the outbound's packet transport; truncated replies
+    ///   retry over TCP through the same outbound.
     pub fn with_proxy(mut self, proxy: DnsProxy) -> Self {
         *self.proxy.get_mut() = Some(ProxyBinding::Fixed(proxy));
         self
@@ -377,13 +382,40 @@ impl DnsClient {
         *binding = Some(ProxyBinding::Dynamic { name, lookup });
     }
 
-    fn query_proxy(&self) -> Result<Option<DnsProxy>, ClientError> {
+    pub(crate) fn enable_rule_routing(&self) {
+        if !matches!(self.transport, Transport::RCode { .. }) {
+            self.proxy
+                .write()
+                .get_or_insert_with(|| ProxyBinding::Dynamic {
+                    name: RULES_OUTBOUND.into(),
+                    lookup: Arc::new(|_, _| None),
+                });
+        }
+    }
+
+    fn query_proxy(&self) -> Result<Option<RoutedProxy>, ClientError> {
+        let (addr, host, network): (SocketAddr, Option<&str>, meow_common::Network) =
+            match &self.transport {
+                Transport::Udp { addr } => (*addr, None, meow_common::Network::Udp),
+                Transport::Tcp { addr } => (*addr, None, meow_common::Network::Tcp),
+                #[cfg(feature = "encrypted")]
+                Transport::Dot { addr, sni } | Transport::Doh { addr, sni, .. } => {
+                    (*addr, Some(sni.as_ref()), meow_common::Network::Tcp)
+                }
+                Transport::RCode { .. } => return Ok(None),
+            };
+        let mut metadata = dns_metadata(addr, network);
+        if let Some(host) = host.filter(|host| host.parse::<IpAddr>().is_err()) {
+            metadata.host = host.into();
+        }
         match self.proxy.read().as_ref() {
             None => Ok(None),
-            Some(ProxyBinding::Fixed(proxy)) => Ok(Some(Arc::clone(proxy))),
-            Some(ProxyBinding::Dynamic { name, lookup }) => lookup(name).map(Some).ok_or(
-                ClientError::Protocol("configured DNS outbound is unavailable"),
-            ),
+            Some(ProxyBinding::Fixed(proxy)) => Ok(Some(Arc::clone(proxy) as RoutedProxy)),
+            Some(ProxyBinding::Dynamic { name, lookup }) => lookup(name, &metadata)
+                .map(Some)
+                .ok_or(ClientError::Protocol(
+                    "configured DNS outbound is unavailable",
+                )),
         }
     }
 
@@ -747,7 +779,10 @@ impl DnsClient {
     ) -> Result<Message, ClientError> {
         let proxy = self.query_proxy()?;
         match &self.transport {
-            Transport::Udp { addr } | Transport::Tcp { addr } if proxy.is_some() => {
+            Transport::Udp { addr } if proxy.is_some() => {
+                proxy_udp_exchange(proxy.as_ref().unwrap(), *addr, wire, expected).await
+            }
+            Transport::Tcp { addr } if proxy.is_some() => {
                 let response = proxy_tcp_exchange(proxy.as_ref().unwrap(), *addr, wire).await?;
                 decode_validated_response(&response, expected)
             }
@@ -831,7 +866,7 @@ fn socket_label(addr: SocketAddr, default_port: u16) -> String {
 }
 
 async fn proxy_tcp_exchange(
-    proxy: &DnsProxy,
+    proxy: &RoutedProxy,
     addr: SocketAddr,
     wire: &[u8],
 ) -> Result<Vec<u8>, ClientError> {
@@ -840,23 +875,73 @@ async fn proxy_tcp_exchange(
     read_lp(&mut stream).await
 }
 
+async fn proxy_udp_exchange(
+    proxy: &RoutedProxy,
+    addr: SocketAddr,
+    wire: &[u8],
+    expected: &ExpectedResponse,
+) -> Result<Message, ClientError> {
+    if !proxy.support_udp() {
+        return Err(ClientError::Protocol(
+            "configured DNS outbound does not support UDP",
+        ));
+    }
+    struct PacketGuard(Box<dyn meow_common::ProxyPacketConn>);
+    impl Drop for PacketGuard {
+        fn drop(&mut self) {
+            let _ = self.0.close();
+        }
+    }
+    let map_error = |e| ClientError::Io(io::Error::other(e));
+    let packet = PacketGuard(
+        proxy
+            .dial_udp(&dns_metadata(addr, meow_common::Network::Udp))
+            .await
+            .map_err(map_error)?,
+    );
+    packet
+        .0
+        .write_packet(wire, &addr)
+        .await
+        .map_err(map_error)?;
+    let mut buffer = vec![0; 65535];
+    loop {
+        let (size, peer) = packet.0.read_packet(&mut buffer).await.map_err(map_error)?;
+        if peer != addr {
+            continue;
+        }
+        let Ok(response) = decode_validated_response(&buffer[..size], expected) else {
+            continue;
+        };
+        if response.metadata.truncation {
+            drop(packet);
+            let wire = proxy_tcp_exchange(proxy, addr, wire).await?;
+            return decode_validated_response(&wire, expected);
+        }
+        return Ok(response);
+    }
+}
+
 async fn proxy_tcp_connect(
-    proxy: &DnsProxy,
+    proxy: &RoutedProxy,
     addr: SocketAddr,
 ) -> Result<Box<dyn meow_common::ProxyConn>, ClientError> {
-    use meow_common::{ConnType, Metadata, Network};
-    let metadata = Metadata {
-        network: Network::Tcp,
-        conn_type: ConnType::Inner,
-        host: smol_str::SmolStr::from(addr.ip().to_string()),
-        dst_ip: Some(addr.ip()),
-        dst_port: addr.port(),
-        ..Default::default()
-    };
+    let metadata = dns_metadata(addr, meow_common::Network::Tcp);
     proxy
         .dial_tcp(&metadata)
         .await
         .map_err(|e| ClientError::Io(io::Error::other(format!("dns-via-proxy dial: {e}"))))
+}
+
+fn dns_metadata(addr: SocketAddr, network: meow_common::Network) -> meow_common::Metadata {
+    meow_common::Metadata {
+        network,
+        conn_type: meow_common::ConnType::Inner,
+        host: smol_str::SmolStr::from(addr.ip().to_string()),
+        dst_ip: Some(addr.ip()),
+        dst_port: addr.port(),
+        ..Default::default()
+    }
 }
 
 fn ip_from_record(rec: &Record) -> Option<IpAddr> {
@@ -1078,7 +1163,7 @@ async fn dot_exchange(
     addr: SocketAddr,
     sni: &str,
     wire: &[u8],
-    proxy: Option<&DnsProxy>,
+    proxy: Option<&RoutedProxy>,
 ) -> Result<Vec<u8>, ClientError> {
     let mut stream = encrypted_connect(addr, sni, "dot", proxy).await?;
     write_lp(&mut stream, wire).await?;
@@ -1129,7 +1214,7 @@ async fn doh_exchange(
     sni: &str,
     path: &str,
     wire: &[u8],
-    proxy: Option<&DnsProxy>,
+    proxy: Option<&RoutedProxy>,
 ) -> Result<Vec<u8>, ClientError> {
     let mut stream = encrypted_connect(addr, sni, "http/1.1", proxy).await?;
 
@@ -1181,7 +1266,7 @@ async fn encrypted_connect(
     addr: SocketAddr,
     sni: &str,
     alpn: &str,
-    proxy: Option<&DnsProxy>,
+    proxy: Option<&RoutedProxy>,
 ) -> Result<Box<dyn meow_transport::Stream>, ClientError> {
     let tls = tls_layer(sni, alpn)?;
     let stream: Box<dyn meow_transport::Stream> = match proxy {
