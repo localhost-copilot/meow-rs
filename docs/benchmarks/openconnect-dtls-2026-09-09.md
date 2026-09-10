@@ -1,5 +1,8 @@
 # OpenConnect：真实 ocserv 上与 mihomo 的同配置性能对比
 
+本文保留 Rust 1.89 / smoltcp 0.12 的历史结果。升级后的 iperf3 和双向回显对照见
+[Rust 1.91 性能报告](openconnect-iperf3-2026-09-09.md)。
+
 日期：2026-09-09。meow 为 `96b914a` 加随本文提交的发送预算、数据缓冲复用和
 release 优化；mihomo 为用户指定 checkout 的 `260cce1faacd14f1e1123a01748dbf9d088d26e4`。
 

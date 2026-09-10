@@ -7,6 +7,7 @@ refactor/cleanup-2026-05 work (M1 + M2).
 
 | File | Contents |
 |------|----------|
+| [openconnect-iperf3-2026-09-09.md](openconnect-iperf3-2026-09-09.md) | Rust 1.91 / smoltcp 0.14 CUBIC upgrade: real ocserv iperf3 upload/download and full-duplex echo comparison against mihomo |
 | [openconnect-dtls-2026-09-09.md](openconnect-dtls-2026-09-09.md) | Real ocserv TLS/DTLS throughput and latency, equivalent-configuration mihomo comparison, raw measurements and reproduction commands |
 | [footprint-types-baseline.md](footprint-types-baseline.md) | Struct sizes at M2 open (`-Zprint-type-sizes`): Metadata 272 B, ConnectionInfo 408 B, UdpSession 48 B, MeowError 32 B, AdapterType 1 B |
 | [footprint-rss-baseline.md](footprint-rss-baseline.md) | RSS at M2 open: idle 9.2 MB, load 11.4 MB, ~35 KB/conn steady-state |

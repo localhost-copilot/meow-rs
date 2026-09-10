@@ -189,10 +189,10 @@ macOS ARM64 上已通过真实 ocserv 的现代 PSK（VPN DNS、双栈 TCP/UDP�
 首包丢失与双向数据报测试、UDP 黑洞截止测试通过。三种模式和切换逻辑已接入。
 真实 ocserv 的 `auto` UDP 阻断／TLS 回退／DTLS 恢复已验证，原 TCP/UDP socket
 保持可用；`require` 阻断时原 socket 失败，业务数据不回退 TLS。错误 PSK 和错误
-注入恢复密钥被独立参考网关拒绝。Debian glibc / Rust 1.89 / OpenSSL 3.0.20
+注入恢复密钥被独立参考网关拒绝。Debian glibc / Rust 1.91 / OpenSSL 3.0.20
 已通过实际 Linux 客户端、VPN DNS 和双栈 SOCKS HTTP 验证。
 真实 Docker ocserv 的 TLS/DTLS benchmark 与 mihomo 对比记录见
-[性能报告](../benchmarks/openconnect-dtls-2026-09-09.md)。
+[iperf3 与回显性能报告](../benchmarks/openconnect-iperf3-2026-09-09.md)。
 
 ## 7. 配置与 Cargo 接入
 
@@ -212,6 +212,12 @@ PEM 表示差异只做语法转换，信任证书相同。
 出现差距时先区分网络／socket 缓冲丢包、用户态 TCP 栈、任务调度和加密开销，
 每次改动用相同基准验证，并回归 DTLS 故障切换、取消和资源释放行为。
 本机低延迟 Docker 结果只代表该环境；WAN 延迟、丢包和更多并发需要单独报告。
+
+用户已接受将 workspace 最低 Rust 版本升级为 1.91；用户态栈升级为 smoltcp 0.14，
+启用 CUBIC。性能验收增加真实 ocserv 内的 iperf3，分别报告单流／四流 TCP
+上传与反向下载。iperf3 控制和数据连接均通过相同的本地 SOCKS5 转发入口；
+客户端报告的 TCP 重传和拥塞窗口属于本地转发连接，不能视作 VPN 内 TCP 栈指标。
+iperf3 的单向吞吐不能替代双向回显验收：后者继续检查完整载荷，并单独报告性能差距。
 
 以下展示阶段 1 的核心配置；构建方式、完整示例和字段限制见
 [使用说明](../openconnect.md)。占位 Cookie 需要替换，meow 不因此新增环境变量插值语义。

@@ -9,8 +9,8 @@ IPv4/IPv6 TCP/UDP 流量送入 VPN。支持 authgroup、VPN DNS 和有界重连�
 CSTP 沿用 meow 的 BoringSSL TLS 层。可选 OpenSSL DTLS 后端已通过真实 ocserv
 互通、UDP 阻断与恢复测试；构建和运行条件见下文。
 
-同配置 mihomo 对比和原始数据见 [性能报告](benchmarks/openconnect-dtls-2026-09-09.md)。
-当前 DTLS 会话使用 32 KiB 共享 TCP 发送预算来限制突发，每流至少保留一个 MTU；
+同配置 mihomo 对比和原始数据见 [iperf3 与回显性能报告](benchmarks/openconnect-iperf3-2026-09-09.md)。
+当前 DTLS 会话使用 64 KiB 共享 TCP 发送预算来限制突发，每流上限 32 KiB、下限一个 MTU；
 这能减少网关 UDP 接收缓冲溢出，但可能限制高带宽、高延迟链路的吞吐。
 `auto` 在同一会话内回退 TLS 时保留该预算。当前本地基准不代表 WAN 性能已经对齐。
 
@@ -111,7 +111,8 @@ cargo build --release -p meow-app --features openconnect-dtls
 macOS 使用 Homebrew OpenSSL 3，glibc Linux 使用系统 `libssl.so.3`。
 为避免与 BoringSSL 的同名 C 符号混用，后端通过独立库句柄解析 OpenSSL API；
 glibc 使用 deep binding。macOS ARM64 与 Debian glibc Linux 已通过真实互通验证；
-Linux 同时验证了 Rust 1.89 构建及 OpenSSL 3.0.20 运行。
+最低 Rust 版本为 1.91，用户态 TCP 栈使用 smoltcp 0.14 的 CUBIC。
+Linux 验证使用 Rust 1.91 及 OpenSSL 3.0.20。
 musl、Windows、BSD 不在本阶段已验证支持范围。
 
 | `dtls-mode` | 行为 |
@@ -135,7 +136,7 @@ TCP/UDP；参考网关的 App-ID PSK 与 ChaCha20-Poly1305 注入恢复。
 参考网关的错误 PSK／恢复密钥拒绝测试通过。旧 Cisco DTLS 未列入支持范围。
 
 真实 ocserv 的吞吐、延迟、服务器计数和 mihomo 同配置对比见
-[性能报告](benchmarks/openconnect-dtls-2026-09-09.md)。基准是显式运行的 ignored
+[性能报告](benchmarks/openconnect-iperf3-2026-09-09.md)。基准是显式运行的 ignored
 测试，不访问外部 VPN，也不在 CI 中运行真实节点测试。
 
 ```bash
