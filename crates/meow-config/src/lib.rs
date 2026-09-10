@@ -549,7 +549,7 @@ pub type RebuildResult = (HashMap<SmolStr, Arc<dyn Proxy>>, Vec<Box<dyn Rule>>);
 /// Does not resolve rule-provider cache paths; use
 /// [`rebuild_from_raw_with_cache_dir`] when a working directory is available.
 pub fn rebuild_from_raw(raw: &raw::RawConfig) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, None, None, &HashMap::new(), None, None, None)
+    rebuild_from_raw_impl(raw, None, None, &HashMap::new(), None)
 }
 
 /// Rebuild proxies/rules and inject `resolver` into the built-in DIRECT
@@ -566,7 +566,7 @@ pub fn rebuild_from_raw_with_resolver(
     resolver: Option<Arc<Resolver>>,
     cache_dir: Option<&Path>,
 ) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new(), None, None, None)
+    rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new(), None)
 }
 
 /// Runtime rebuild variant that keeps live proxy-provider slots and the
@@ -586,15 +586,7 @@ pub fn rebuild_from_raw_runtime(
     } else {
         None
     };
-    rebuild_from_raw_impl(
-        raw,
-        cache_dir,
-        resolver,
-        providers,
-        store.as_ref(),
-        None,
-        None,
-    )
+    rebuild_from_raw_impl(raw, cache_dir, resolver, providers, store.as_ref())
 }
 
 /// Same as [`rebuild_from_raw`] but accepts a `cache_dir` used to resolve
@@ -605,7 +597,7 @@ pub fn rebuild_from_raw_with_cache_dir(
     cache_dir: Option<&Path>,
     resolver: Option<Arc<Resolver>>,
 ) -> Result<RebuildResult, anyhow::Error> {
-    rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new(), None, None, None)
+    rebuild_from_raw_impl(raw, cache_dir, resolver, &HashMap::new(), None)
 }
 
 /// Apply per-outbound `dialer-proxy` in place (issue #210).
@@ -833,15 +825,13 @@ fn primary_global_target<'a>(
         .find(|name| is_usable_global_target(name, proxies))
 }
 
-fn rebuild_from_raw_impl(
+fn build_proxy_registry(
     raw: &raw::RawConfig,
     cache_dir: Option<&Path>,
     resolver: Option<Arc<Resolver>>,
     providers: &HashMap<String, Arc<ProxyProvider>>,
     selector_store: Option<&Arc<meow_proxy::SelectorStore>>,
-    shared_ctx: Option<&meow_rules::ParserContext>,
-    prefetched_payloads: Option<&rule_provider::PrefetchedPayloads>,
-) -> Result<RebuildResult, anyhow::Error> {
+) -> Result<HashMap<SmolStr, Arc<dyn Proxy>>, anyhow::Error> {
     let ipv6 = effective_ipv6(raw.ipv6);
     parse_sniffer_config(raw)?;
     let mut proxies: HashMap<SmolStr, Arc<dyn Proxy>> = HashMap::new();
@@ -994,11 +984,6 @@ fn rebuild_from_raw_impl(
     // leaf proxies and groups are built so a dialer may reference either.
     apply_dialer_proxies(&mut proxies, raw.proxies.as_deref().unwrap_or(&[]), ipv6)?;
 
-    let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
-    // Per-provider `proxy:` overrides resolve against the full registry —
-    // groups and provider-sourced proxies included (issue #377).
-    let registry_lookup = |name: &str| proxies.get(name).cloned();
-
     // Fail hard on any rule- or proxy-provider path that would escape the
     // provider cache directory — before any fetch or on-disk write happens,
     // so a hostile `PUT /configs` is rejected without touching the
@@ -1012,47 +997,55 @@ fn rebuild_from_raw_impl(
         proxy_provider::validate_paths(map, cache_dir).map_err(|e| anyhow::anyhow!("{e}"))?;
     }
 
+    Ok(proxies)
+}
+
+fn rebuild_from_raw_impl(
+    raw: &raw::RawConfig,
+    cache_dir: Option<&Path>,
+    resolver: Option<Arc<Resolver>>,
+    providers: &HashMap<String, Arc<ProxyProvider>>,
+    selector_store: Option<&Arc<meow_proxy::SelectorStore>>,
+) -> Result<RebuildResult, anyhow::Error> {
+    let proxies = build_proxy_registry(raw, cache_dir, resolver, providers, selector_store)?;
+    let download_proxy = internal_http::first_named_proxy(raw.proxies.as_deref(), &proxies);
+    let registry_lookup = |name: &str| proxies.get(name).cloned();
+
     // Fetch/read rule-provider payload bytes once — the parser-context build
     // scans them for geo keys (issue #277) and the provider load below parses
     // the same bytes, so nothing is fetched twice.
-    let owned_payloads;
-    let payloads = match prefetched_payloads {
-        Some(p) => p,
-        None => {
-            owned_payloads = match raw.rule_providers.as_ref() {
-                Some(map) if !map.is_empty() => rule_provider::prefetch_payloads(
-                    map,
-                    cache_dir,
-                    download_proxy.as_ref(),
-                    &registry_lookup,
-                ),
-                _ => HashMap::new(),
-            };
-            &owned_payloads
-        }
+    let payloads = match raw.rule_providers.as_ref() {
+        Some(map) if !map.is_empty() => rule_provider::prefetch_payloads(
+            map,
+            cache_dir,
+            download_proxy.as_ref(),
+            &registry_lookup,
+        ),
+        _ => HashMap::new(),
     };
-
-    let owned_ctx;
-    let ctx = match shared_ctx {
-        Some(c) => c,
-        None => {
-            owned_ctx = build_parser_context_from_raw(raw, payloads)?;
-            &owned_ctx
-        }
-    };
+    let ctx = build_parser_context_from_raw(raw, &payloads)?;
 
     let providers = match raw.rule_providers.as_ref() {
         Some(map) if !map.is_empty() => rule_provider::load_providers_prefetched(
             map,
             cache_dir,
-            ctx,
+            &ctx,
             download_proxy.as_ref(),
             &registry_lookup,
-            payloads,
+            &payloads,
         ),
         _ => HashMap::new(),
     };
-    let ruleset_map = rule_provider::snapshot_ruleset_map(&providers);
+    let rules = build_rules(raw, &providers, &ctx)?;
+    Ok((proxies, rules))
+}
+
+fn build_rules(
+    raw: &raw::RawConfig,
+    providers: &HashMap<String, Arc<rule_provider::RuleProvider>>,
+    ctx: &meow_rules::ParserContext,
+) -> Result<Vec<Box<dyn Rule>>, anyhow::Error> {
+    let ruleset_map = rule_provider::snapshot_ruleset_map(providers);
 
     // Parse sub-rules before top-level rules so that SUB-RULE entries in
     // `rules:` can resolve against already-built blocks.
@@ -1083,7 +1076,7 @@ fn rebuild_from_raw_impl(
         }
     }
 
-    Ok((proxies, rules))
+    Ok(rules)
 }
 
 async fn open_selector_store_async(
@@ -1148,24 +1141,20 @@ async fn prefetch_rule_provider_payloads_async(
     })
 }
 
-async fn rebuild_from_raw_impl_async(
+async fn build_proxy_registry_async(
     raw: raw::RawConfig,
     cache_dir: Option<PathBuf>,
     resolver: Option<Arc<Resolver>>,
     providers: HashMap<String, Arc<ProxyProvider>>,
     selector_store: Option<Arc<meow_proxy::SelectorStore>>,
-    ctx: meow_rules::ParserContext,
-    provider_payloads: Arc<rule_provider::PrefetchedPayloads>,
-) -> Result<RebuildResult, anyhow::Error> {
+) -> Result<HashMap<SmolStr, Arc<dyn Proxy>>, anyhow::Error> {
     spawn_blocking_with_current_dispatcher(move || {
-        rebuild_from_raw_impl(
+        build_proxy_registry(
             &raw,
             cache_dir.as_deref(),
             resolver,
             &providers,
             selector_store.as_ref(),
-            Some(&ctx),
-            Some(&provider_payloads),
         )
     })
     .await
@@ -2166,14 +2155,12 @@ async fn build_config(
     )
     .await?;
 
-    let (proxies, _) = rebuild_from_raw_impl_async(
+    let proxies = build_proxy_registry_async(
         raw.clone(),
         cache_dir_buf.clone(),
         None,
         proxy_providers.clone(),
         selector_store.clone(),
-        ctx.clone(),
-        Arc::clone(&provider_payloads),
     )
     .await?;
 
@@ -2210,16 +2197,24 @@ async fn build_config(
     )
     .await?;
 
-    let (proxies, rules) = rebuild_from_raw_impl_async(
+    let proxies = build_proxy_registry_async(
         raw.clone(),
         cache_dir_buf.clone(),
         Some(Arc::clone(&dns_config.resolver)),
         proxy_providers.clone(),
         selector_store.clone(),
-        ctx.clone(),
-        Arc::clone(&provider_payloads),
     )
     .await?;
+
+    // DNS and routing retain snapshots of the same immutable matchers. Rebuilding
+    // providers here would duplicate large tries and discard a full startup pass.
+    let rules = {
+        let raw = raw.clone();
+        let providers = rule_providers.clone();
+        spawn_blocking_with_current_dispatcher(move || build_rules(&raw, &providers, &ctx))
+            .await
+            .map_err(|e| anyhow::anyhow!("rule build task failed: {e}"))??
+    };
 
     // Listener config
     // DNS was built before the final resolver-aware registry. Keep only weak
