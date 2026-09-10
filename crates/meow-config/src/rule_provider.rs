@@ -5,6 +5,7 @@
 //! HTTP providers with `interval > 0` expose a `refresh()` method that is
 //! called from a background tokio task spawned by `main.rs`.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -266,6 +267,10 @@ pub fn load_providers_prefetched(
     if raw_providers.is_empty() {
         return out;
     }
+    let mut parser = RuleSetParser {
+        context: ctx,
+        parsed: HashMap::new(),
+    };
     for (name, cfg) in raw_providers {
         let download_proxy = if cfg.provider_type == "http" {
             match effective_download_proxy(cfg, default_proxy, lookup) {
@@ -279,7 +284,14 @@ pub fn load_providers_prefetched(
             None
         };
         let payload = prefetched.get(name).map(Vec::as_slice);
-        match load_one(name, cfg, cache_dir, ctx, download_proxy.as_ref(), payload) {
+        match load_one(
+            name,
+            cfg,
+            cache_dir,
+            &mut parser,
+            download_proxy.as_ref(),
+            payload,
+        ) {
             Ok(provider) => {
                 debug!(
                     "Loaded rule-provider '{}' ({}/{}): {} entries",
@@ -314,20 +326,20 @@ fn load_one(
     name: &str,
     cfg: &RawRuleProvider,
     cache_dir: Option<&Path>,
-    ctx: &ParserContext,
+    parser: &mut RuleSetParser<'_>,
     download_proxy: Option<&Arc<dyn Proxy>>,
     prefetched: Option<&[u8]>,
 ) -> Result<RuleProvider> {
     let behavior: RuleSetBehavior = cfg.behavior.parse().map_err(|e: String| anyhow!("{e}"))?;
     match cfg.provider_type.as_str() {
-        "inline" => load_inline(name, cfg, behavior, ctx),
-        "file" => load_file(name, cfg, cache_dir, behavior, ctx, prefetched),
+        "inline" => load_inline(name, cfg, behavior, parser.context),
+        "file" => load_file(name, cfg, cache_dir, behavior, parser, prefetched),
         "http" => load_http(
             name,
             cfg,
             cache_dir,
             behavior,
-            ctx,
+            parser,
             download_proxy,
             prefetched,
         ),
@@ -358,7 +370,7 @@ fn load_inline(
         behavior,
         String::new(),
         0,
-        rules,
+        Arc::from(rules),
         None,
     ))
 }
@@ -368,7 +380,7 @@ fn load_file(
     cfg: &RawRuleProvider,
     cache_dir: Option<&Path>,
     behavior: RuleSetBehavior,
-    ctx: &ParserContext,
+    parser: &mut RuleSetParser<'_>,
     prefetched: Option<&[u8]>,
 ) -> Result<RuleProvider> {
     if cfg.interval.is_some_and(|i| i > 0) {
@@ -381,12 +393,14 @@ fn load_file(
     let path = resolve_path(cfg, cache_dir, name, false)?
         .ok_or_else(|| anyhow!("file provider '{name}' requires a 'path'"))?;
     let bytes = match prefetched {
-        Some(b) => b.to_vec(),
-        None => std::fs::read(&path)
-            .with_context(|| format!("reading provider file {}", path.display()))?,
+        Some(b) => Cow::Borrowed(b),
+        None => Cow::Owned(
+            std::fs::read(&path)
+                .with_context(|| format!("reading provider file {}", path.display()))?,
+        ),
     };
     let explicit_format = parse_explicit_format(cfg)?;
-    let rules = parse_bytes_to_ruleset_with_format(&bytes, behavior, explicit_format, ctx)?;
+    let rules = parser.parse(&bytes, behavior, explicit_format)?;
     let vehicle = path.display().to_string();
     Ok(make_provider(
         name,
@@ -404,7 +418,7 @@ fn load_http(
     cfg: &RawRuleProvider,
     cache_dir: Option<&Path>,
     behavior: RuleSetBehavior,
-    ctx: &ParserContext,
+    parser: &mut RuleSetParser<'_>,
     download_proxy: Option<&Arc<dyn Proxy>>,
     prefetched: Option<&[u8]>,
 ) -> Result<RuleProvider> {
@@ -416,15 +430,15 @@ fn load_http(
     let explicit_format = parse_explicit_format(cfg)?;
     let interval = cfg.interval.unwrap_or(0);
     let bytes = match prefetched {
-        Some(b) => b.to_vec(),
-        None => fetch_http_blocking_with_cache(
+        Some(b) => Cow::Borrowed(b),
+        None => Cow::Owned(fetch_http_blocking_with_cache(
             url,
             cache_path.as_deref(),
             download_proxy,
             interval > 0,
-        )?,
+        )?),
     };
-    let rules = parse_bytes_to_ruleset_with_format(&bytes, behavior, explicit_format, ctx)?;
+    let rules = parser.parse(&bytes, behavior, explicit_format)?;
     Ok(make_provider(
         name,
         ProviderType::Http,
@@ -442,14 +456,13 @@ fn make_provider(
     behavior: RuleSetBehavior,
     vehicle: String,
     interval: u64,
-    rules: Box<dyn RuleSet>,
+    rules: Arc<dyn RuleSet>,
     download_proxy: Option<Arc<dyn Proxy>>,
 ) -> RuleProvider {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs();
-    let rules_arc: Arc<dyn RuleSet> = Arc::from(rules);
     RuleProvider {
         name: name.to_string(),
         provider_type,
@@ -457,7 +470,7 @@ fn make_provider(
         vehicle,
         interval,
         updated_at: AtomicU::new(now as meow_common::atomic::Uint),
-        rules: RwLock::new(rules_arc),
+        rules: RwLock::new(rules),
         download_proxy,
     }
 }
@@ -465,6 +478,41 @@ fn make_provider(
 // ---------------------------------------------------------------------------
 // Format detection + parsing
 // ---------------------------------------------------------------------------
+
+// Scoped to one load and its geodata context: immutable matchers can be shared,
+// while provider names, refresh schedules and replacement slots stay independent.
+// Dropping the parser releases the payload keys; it is never used for lookups.
+struct RuleSetParser<'a> {
+    context: &'a ParserContext,
+    parsed: HashMap<(RuleSetBehavior, RuleSetFormat, Vec<u8>), Arc<dyn RuleSet>>,
+}
+
+impl RuleSetParser<'_> {
+    fn parse(
+        &mut self,
+        bytes: &[u8],
+        behavior: RuleSetBehavior,
+        format: Option<RuleSetFormat>,
+    ) -> Result<Arc<dyn RuleSet>> {
+        let format = if is_mrs_bytes(bytes) {
+            RuleSetFormat::Mrs
+        } else {
+            format.unwrap_or(RuleSetFormat::Yaml)
+        };
+        let key = (behavior, format, bytes.to_vec());
+        if let Some(rules) = self.parsed.get(&key) {
+            return Ok(Arc::clone(rules));
+        }
+        let rules: Arc<dyn RuleSet> = Arc::from(parse_bytes_to_ruleset_with_format(
+            bytes,
+            behavior,
+            Some(format),
+            self.context,
+        )?);
+        self.parsed.insert(key, Arc::clone(&rules));
+        Ok(rules)
+    }
+}
 
 fn parse_explicit_format(cfg: &RawRuleProvider) -> Result<Option<RuleSetFormat>> {
     cfg.format
@@ -727,6 +775,59 @@ mod tests {
 
     fn ctx() -> ParserContext {
         ParserContext::empty()
+    }
+
+    #[tokio::test]
+    async fn identical_payloads_share_matchers_but_refresh_independently() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            let body = "payload:\n  - '+.updated.example'\n";
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let mut first = http_cfg(None);
+        first.url = Some(format!("http://{address}/rules.yaml"));
+        let mut second = first.clone();
+        second.format = None;
+        let configs = HashMap::from([("first".into(), first), ("second".into(), second)]);
+        let bytes = b"payload:\n  - '+.original.example'\n";
+        let payloads = HashMap::from([
+            ("first".into(), bytes.to_vec()),
+            ("second".into(), bytes.to_vec()),
+        ]);
+        let providers =
+            load_providers_prefetched(&configs, None, &ctx(), None, &|_| None, &payloads);
+        let original = providers["first"].snapshot();
+        assert!(Arc::ptr_eq(&original, &providers["second"].snapshot()));
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            providers["first"].refresh(&ctx()).await.unwrap();
+            server.await.unwrap();
+        })
+        .await
+        .unwrap();
+
+        let updated = providers["first"].snapshot();
+        assert!(updated.matches_domain("www.updated.example"));
+        assert!(!updated.matches_domain("www.original.example"));
+        let unchanged = providers["second"].snapshot();
+        assert!(Arc::ptr_eq(&original, &unchanged));
+        assert!(unchanged.matches_domain("www.original.example"));
+        assert!(!unchanged.matches_domain("www.updated.example"));
     }
 
     fn http_cfg(proxy: Option<&str>) -> RawRuleProvider {
