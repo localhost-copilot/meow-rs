@@ -215,6 +215,7 @@ async fn handle_socks5_inner(
     };
 
     // Sniff TLS SNI or HTTP Host header from the initial payload bytes.
+    tunnel.inner().pre_handle_metadata(&mut metadata);
     if let Some(rt) = sniffer {
         rt.sniff(stream, &mut metadata).await;
     }

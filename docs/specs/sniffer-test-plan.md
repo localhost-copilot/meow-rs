@@ -1,5 +1,10 @@
 # Test Plan: TLS/HTTP sniffer (M1.F-2)
 
+The 2026-09 implemented compatibility update in `sniffer.md` supersedes this
+prototype plan's false override default, unconditional `parse-pure-ip: false`
+behavior and ignored `force-dns-mapping`. Runtime tests exercise protocol-level
+overrides on overlapping ports and verify that destination IPs are cleared.
+
 Status: **draft** — owner: qa. Last updated: 2026-04-11.
 Tracks: task #36. Companion to `docs/specs/sniffer.md` (rev 2.1).
 

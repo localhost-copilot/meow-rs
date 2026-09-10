@@ -15,7 +15,7 @@ pub struct SnifferRuntime {
     cfg: SnifferConfig,
     skip: DomainTrie<()>,
     force: DomainTrie<()>,
-    port_map: HashMap<u16, Proto>,
+    port_map: HashMap<u16, Vec<Proto>>,
 }
 
 impl SnifferRuntime {
@@ -28,12 +28,12 @@ impl SnifferRuntime {
         for d in &cfg.force_domain {
             force.insert(d, ());
         }
-        let mut port_map = HashMap::new();
+        let mut port_map: HashMap<u16, Vec<Proto>> = HashMap::new();
         for &p in &cfg.tls_ports {
-            port_map.insert(p, Proto::Tls);
+            port_map.entry(p).or_default().push(Proto::Tls);
         }
         for &p in &cfg.http_ports {
-            port_map.insert(p, Proto::Http);
+            port_map.entry(p).or_default().push(Proto::Http);
         }
         Self {
             cfg,
@@ -59,16 +59,16 @@ impl SnifferRuntime {
 
         // parse-pure-ip gate: skip if host is already a non-IP domain name,
         // unless that domain is in the force list.
-        if self.cfg.parse_pure_ip
-            && !metadata.host.is_empty()
-            && metadata.host.parse::<IpAddr>().is_err()
+        let pure_ip = metadata.host.is_empty() || metadata.host.parse::<IpAddr>().is_ok();
+        let mapped = metadata.dns_mode == meow_common::DnsMode::Mapping;
+        if !(pure_ip && self.cfg.parse_pure_ip || mapped && self.cfg.force_dns_mapping)
             && self.force.search(&metadata.host).is_none()
         {
             return;
         }
 
         // Per-port protocol dispatch.
-        let Some(proto) = self.port_map.get(&metadata.dst_port) else {
+        let Some(protocols) = self.port_map.get(&metadata.dst_port) else {
             return;
         };
 
@@ -79,13 +79,15 @@ impl SnifferRuntime {
             return;
         };
 
-        let sniffed = match proto {
-            Proto::Tls => sniff_tls(&buf[..n]),
-            Proto::Http => sniff_http(&buf[..n]),
-        };
-
-        if let Some(host) = sniffed {
-            self.maybe_apply_sniff(&host, metadata);
+        for proto in protocols {
+            let (sniffed, override_destination) = match proto {
+                Proto::Tls => (sniff_tls(&buf[..n]), self.cfg.tls_override_destination),
+                Proto::Http => (sniff_http(&buf[..n]), self.cfg.http_override_destination),
+            };
+            if let Some(host) = sniffed {
+                self.apply_sniff(&host, metadata, override_destination);
+                break;
+            }
         }
     }
 
@@ -93,6 +95,10 @@ impl SnifferRuntime {
     /// and `override-destination`. Used for the HTTP proxy plain-request path
     /// where headers are already read into a buffer rather than peeked.
     pub fn maybe_apply_sniff(&self, host: &str, metadata: &mut Metadata) {
+        self.apply_sniff(host, metadata, self.cfg.http_override_destination);
+    }
+
+    fn apply_sniff(&self, host: &str, metadata: &mut Metadata, override_destination: Option<bool>) {
         if !self.cfg.enable {
             return;
         }
@@ -101,9 +107,11 @@ impl SnifferRuntime {
         }
         debug!("sniffer: {} → {}", metadata, host);
         metadata.sniff_host = host.into();
-        if self.cfg.override_destination {
+        if override_destination.unwrap_or(self.cfg.override_destination) {
             metadata.host = host.into();
+            metadata.dst_ip = None;
         }
+        metadata.dns_mode = meow_common::DnsMode::Normal;
     }
 }
 
@@ -241,7 +249,7 @@ mod tests {
     async fn sniffer_skip_domain_discards_result() {
         let cfg = SnifferConfig {
             enable: true,
-            parse_pure_ip: false,
+            parse_pure_ip: true,
             tls_ports: vec![443],
             skip_domain: vec!["+.example.com".into()],
             ..Default::default()
@@ -280,6 +288,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn overlapping_ports_use_the_successful_protocols_override() {
+        let runtime = make_runtime(SnifferConfig {
+            enable: true,
+            tls_ports: vec![8443],
+            http_ports: vec![8443],
+            tls_override_destination: Some(false),
+            http_override_destination: Some(true),
+            ..Default::default()
+        });
+        for (payload, override_ip) in [
+            (build_client_hello("tls.example"), false),
+            (
+                b"GET / HTTP/1.1\r\nHost: http.example\r\n\r\n".to_vec(),
+                true,
+            ),
+        ] {
+            let (mut client, server) = make_stream_pair().await;
+            client.write_all(&payload).await.unwrap();
+            let mut meta = make_metadata("", 8443);
+            meta.dst_ip = Some("192.0.2.1".parse().unwrap());
+            runtime.sniff(&server, &mut meta).await;
+            assert!(!meta.sniff_host.is_empty());
+            assert_eq!(meta.dst_ip.is_none(), override_ip);
+            assert_eq!(!meta.host.is_empty(), override_ip);
+        }
+    }
+
+    #[tokio::test]
+    async fn force_dns_mapping_controls_known_mapped_destinations() {
+        for enabled in [false, true] {
+            let runtime = make_runtime(SnifferConfig {
+                enable: true,
+                parse_pure_ip: false,
+                force_dns_mapping: enabled,
+                ..Default::default()
+            });
+            let (mut client, server) = make_stream_pair().await;
+            client
+                .write_all(&build_client_hello("sniffed.example"))
+                .await
+                .unwrap();
+            let mut meta = make_metadata("mapped.example", 443);
+            meta.dns_mode = meow_common::DnsMode::Mapping;
+            runtime.sniff(&server, &mut meta).await;
+            assert_eq!(!meta.sniff_host.is_empty(), enabled);
+            assert_eq!(
+                meta.host,
+                if enabled {
+                    "sniffed.example"
+                } else {
+                    "mapped.example"
+                }
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn sniffer_override_destination_false_leaves_host() {
         let cfg = SnifferConfig {
             enable: true,
@@ -303,7 +368,7 @@ mod tests {
     async fn sniffer_port_dispatch_no_op_for_unregistered_port() {
         let cfg = SnifferConfig {
             enable: true,
-            parse_pure_ip: false,
+            parse_pure_ip: true,
             tls_ports: vec![443],
             http_ports: vec![80],
             ..Default::default()
@@ -323,7 +388,7 @@ mod tests {
     async fn sniffer_timeout_wall_time_bounded() {
         let cfg = SnifferConfig {
             enable: true,
-            parse_pure_ip: false,
+            parse_pure_ip: true,
             timeout: std::time::Duration::from_millis(100),
             tls_ports: vec![443],
             ..Default::default()
@@ -367,9 +432,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sniffer_parse_pure_ip_disabled_runs_on_domain_host() {
-        // parse_pure_ip = false → the host-already-a-domain short-circuit is
-        // skipped and sniffing runs normally.
+    async fn sniffer_parse_pure_ip_disabled_skips_unforced_destinations() {
+        // Disabling pure-IP sniffing does not force known domains to be sniffed.
         let cfg = SnifferConfig {
             enable: true,
             parse_pure_ip: false,
@@ -383,7 +447,7 @@ mod tests {
 
         let mut meta = make_metadata("placeholder.example.com", 443);
         rt.sniff(&server, &mut meta).await;
-        assert_eq!(meta.sniff_host, "real-sni.example.com");
+        assert_eq!(meta.sniff_host, "");
     }
 
     #[test]
@@ -486,7 +550,7 @@ mod tests {
     async fn sniffer_http_port_dispatches_to_http_parser() {
         let cfg = SnifferConfig {
             enable: true,
-            parse_pure_ip: false,
+            parse_pure_ip: true,
             http_ports: vec![80],
             tls_ports: vec![],
             ..Default::default()

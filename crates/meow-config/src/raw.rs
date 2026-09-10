@@ -467,11 +467,7 @@ pub struct RawSniffer {
     pub timeout: Option<u64>,
     pub parse_pure_ip: Option<bool>,
     pub override_destination: Option<bool>,
-    /// Accepted; respected when fake-ip mode is enabled. When true and the
-    /// destination IP is a fake-IP allocation, the sniffer skips peek and
-    /// trusts the fake-IP reverse mapping. Currently unused (the tunnel's
-    /// `pre_handle_metadata` always consults the reverse map regardless), so
-    /// this flag is parsed and ignored for upstream-config compatibility.
+    /// Sniff destinations obtained from a DNS mapping even when a host is known.
     pub force_dns_mapping: Option<bool>,
     /// Protocol → port list map. Recognised keys: `TLS`, `HTTP`.
     pub sniff: Option<HashMap<String, RawSniffProtocol>>,
@@ -484,6 +480,7 @@ pub struct RawSniffer {
 pub struct RawSniffProtocol {
     #[serde(default, deserialize_with = "deserialize_port_list")]
     pub ports: Option<Vec<u16>>,
+    pub override_destination: Option<bool>,
 }
 
 fn deserialize_port_list<'de, D>(deserializer: D) -> Result<Option<Vec<u16>>, D::Error>

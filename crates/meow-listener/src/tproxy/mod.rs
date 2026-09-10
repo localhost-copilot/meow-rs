@@ -294,22 +294,10 @@ async fn handle_tproxy_conn(
         ..Default::default()
     };
 
-    // Recover hostname:
-    // 1. SnifferRuntime (TLS SNI or HTTP Host) — replaces the old enable_sni path
-    // 2. Fall back to DNS snooping reverse lookup (IP → domain from recent DNS queries)
+    tunnel.inner().pre_handle_metadata(&mut metadata);
     if let Some(rt) = sniffer.as_deref() {
         rt.sniff(&stream, &mut metadata).await;
     }
-
-    let mut hostname = metadata.sniff_host.clone();
-    if hostname.is_empty() {
-        if let Some(domain) = tunnel.resolver().reverse_lookup(orig_dst.ip()) {
-            hostname = domain;
-        }
-    }
-
-    // Prefer sniff_host for display but fall back to DNS-snooped hostname.
-    metadata.host = hostname;
 
     debug!(
         "TProxy {} -> {} (host: {})",
