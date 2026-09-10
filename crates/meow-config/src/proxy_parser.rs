@@ -768,7 +768,25 @@ fn parse_anytls(
         .and_then(serde_yaml::Value::as_bool)
         .unwrap_or(false);
 
-    meow_proxy::AnytlsAdapter::new(name, server, port, password, sni, skip_cert_verify, udp)
+    let tls = meow_transport::tls::TlsConfig {
+        skip_cert_verify,
+        fingerprint: config
+            .get("client-fingerprint")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        alpn: config
+            .get("alpn")
+            .and_then(|v| v.as_sequence())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ..meow_transport::tls::TlsConfig::new(sni.filter(|s| !s.is_empty()).unwrap_or(server))
+    };
+    meow_proxy::AnytlsAdapter::new_with_tls(name, server, port, password, udp, tls)
 }
 
 /// Parse a `type: hysteria2` proxy block.
@@ -2907,6 +2925,57 @@ tls: true
             "name: jp\ntype: anytls\nserver: 1.2.3.4\nport: 443\npassword: secret\nsni: example.com\nskip-cert-verify: true\n",
         );
         assert!(parse_proxy(&cfg).is_ok());
+    }
+
+    #[cfg(feature = "anytls")]
+    #[tokio::test]
+    async fn anytls_config_fingerprint_changes_the_wire_client_hello() {
+        use tokio::io::AsyncReadExt;
+        let mut cipher_lists = Vec::new();
+        for profile in ["chrome", "firefox"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let peer = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut record = [0; 5];
+                stream.read_exact(&mut record).await.unwrap();
+                let mut hello = vec![0; u16::from_be_bytes([record[3], record[4]]) as usize];
+                stream.read_exact(&mut hello).await.unwrap();
+                assert!(hello
+                    .windows(b"anytls-test".len())
+                    .any(|v| v == b"anytls-test"));
+                // Handshake header, version, random, then session ID and
+                // ciphers. Exclude random/session-ID bytes and GREASE values.
+                let offset = 39 + hello[38] as usize;
+                let length = u16::from_be_bytes([hello[offset], hello[offset + 1]]) as usize;
+                hello[offset + 2..offset + 2 + length]
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .filter(|c| c & 0x0f0f != 0x0a0a)
+                    .collect::<Vec<_>>()
+            });
+            let cfg = anytls_config(&format!("name: fp\ntype: anytls\nserver: 127.0.0.1\nport: {port}\npassword: fixture\nsni: localhost\nclient-fingerprint: {profile}\nalpn: [anytls-test]\n"));
+            let adapter = parse_proxy(&cfg).unwrap();
+            let metadata = meow_common::Metadata {
+                host: "example.com".into(),
+                dst_port: 443,
+                ..Default::default()
+            };
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                adapter.dial_tcp(&metadata)
+            )
+            .await
+            .unwrap()
+            .is_err());
+            cipher_lists.push(peer.await.unwrap());
+        }
+        assert_ne!(
+            cipher_lists[0], cipher_lists[1],
+            "configured profiles must affect ClientHello"
+        );
     }
 
     /// mihomo's `AnyTLSOption.UDP` is `omitempty`/false by default; only an
