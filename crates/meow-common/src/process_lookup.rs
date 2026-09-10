@@ -8,6 +8,15 @@
 use crate::network::Network;
 use std::net::SocketAddr;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FindProcessMode {
+    #[default]
+    Strict,
+    Always,
+    Off,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ProcessInfo {
     pub name: String,

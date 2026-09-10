@@ -63,6 +63,7 @@ impl RouteTable {
 }
 
 pub struct TunnelInner {
+    process_mode: RwLock<meow_common::process_lookup::FindProcessMode>,
     pub mode: RwLock<TunnelMode>,
     /// Current route table (rules + domain index + proxies), replaced
     /// wholesale on config reload. Readers clone the `Arc` and drop the
@@ -110,6 +111,11 @@ impl TunnelInner {
     /// - `metadata.dst_ip` ← `None`, so `pre_resolve` (or the adapter)
     ///   re-resolves to a real address via the configured DNS path
     pub fn pre_handle_metadata(&self, metadata: &mut Metadata) {
+        if *self.process_mode.read() == meow_common::process_lookup::FindProcessMode::Always {
+            if let Some(enriched) = match_engine::maybe_enrich_with_process(metadata) {
+                *metadata = enriched;
+            }
+        }
         let Some(ip) = metadata.dst_ip else {
             return;
         };
@@ -226,7 +232,10 @@ impl TunnelInner {
                 // from a consistent table. Replaces three RwLock acquisitions.
                 let route = self.route();
                 let needs_proc = route.compiled_rules.needs_process_lookup();
-                let enriched = if needs_proc {
+                let enriched = if needs_proc
+                    && *self.process_mode.read()
+                        != meow_common::process_lookup::FindProcessMode::Off
+                {
                     match_engine::maybe_enrich_with_process(metadata)
                 } else {
                     None
@@ -254,6 +263,12 @@ impl TunnelInner {
         &self,
         metadata: &mut Metadata,
     ) -> Option<(Arc<dyn ProxyAdapter>, SmolStr, SmolStr)> {
+        let process_mode = *self.process_mode.read();
+        if process_mode == meow_common::process_lookup::FindProcessMode::Always {
+            if let Some(enriched) = match_engine::maybe_enrich_with_process(metadata) {
+                *metadata = enriched;
+            }
+        }
         let mode = *self.mode.read();
         if mode != TunnelMode::Rule {
             return self.resolve_proxy(metadata);
@@ -275,7 +290,9 @@ impl TunnelInner {
                 // Process enrichment matches `resolve_proxy`: the enriched
                 // copy is used for matching only, so tracked connection
                 // metadata stays byte-identical to the eager path.
-                let mut enriched = if needs_process {
+                let mut enriched = if needs_process
+                    && process_mode != meow_common::process_lookup::FindProcessMode::Off
+                {
                     match_engine::maybe_enrich_with_process(metadata)
                 } else {
                     None
@@ -382,6 +399,7 @@ impl Tunnel {
         let direct = Arc::new(DirectAdapter::new().with_resolver(Arc::clone(&resolver)));
         Self {
             inner: Arc::new(TunnelInner {
+                process_mode: RwLock::new(Default::default()),
                 mode: RwLock::new(TunnelMode::Rule),
                 route: RwLock::new(Arc::new(RouteTable::empty())),
                 resolver,
@@ -403,6 +421,10 @@ impl Tunnel {
     pub fn set_mode(&self, mode: TunnelMode) {
         *self.inner.mode.write() = mode;
         info!("Tunnel mode set to {}", mode);
+    }
+
+    pub fn set_find_process_mode(&self, mode: meow_common::process_lookup::FindProcessMode) {
+        *self.inner.process_mode.write() = mode;
     }
 
     pub fn mode(&self) -> TunnelMode {
@@ -603,6 +625,90 @@ mod tests {
     use meow_common::DnsMode;
     use meow_dns::Resolver;
     use meow_trie::DomainTrie;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn process_modes_control_lookup_and_keep_supplied_metadata() {
+        use meow_common::process_lookup::FindProcessMode;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let local = listener.local_addr().unwrap();
+        let process = std::env::current_exe()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        for mode in [
+            FindProcessMode::Strict,
+            FindProcessMode::Always,
+            FindProcessMode::Off,
+        ] {
+            let tunnel = test_tunnel();
+            tunnel.set_find_process_mode(mode);
+            let (proxies, _) = meow_config::rebuild_from_raw(&Default::default()).unwrap();
+            tunnel.update_proxies(proxies);
+            tunnel.update_rules(vec![Box::new(meow_rules::final_rule::FinalRule::new(
+                "DIRECT",
+            ))]);
+            let base = Metadata {
+                network: meow_common::Network::Tcp,
+                src_ip: Some(local.ip()),
+                src_port: local.port(),
+                dst_ip: Some("192.0.2.1".parse().unwrap()),
+                dst_port: 443,
+                ..Default::default()
+            };
+            let mut metadata = base.clone();
+            tunnel
+                .inner
+                .resolve_proxy_lazy(&mut metadata)
+                .await
+                .unwrap();
+            assert_eq!(
+                !metadata.process.is_empty(),
+                mode == FindProcessMode::Always
+            );
+
+            tunnel.update_rules(vec![
+                Box::new(meow_rules::process::ProcessRule::new(&process, "REJECT")),
+                Box::new(meow_rules::final_rule::FinalRule::new("DIRECT")),
+            ]);
+            let mut metadata = base.clone();
+            let (proxy, _, _) = tunnel
+                .inner
+                .resolve_proxy_lazy(&mut metadata)
+                .await
+                .unwrap();
+            assert_eq!(
+                proxy.name(),
+                if mode == FindProcessMode::Off {
+                    "DIRECT"
+                } else {
+                    "REJECT"
+                }
+            );
+            assert_eq!(
+                tunnel.inner.resolve_proxy(&base).unwrap().0.name(),
+                if mode == FindProcessMode::Off {
+                    "DIRECT"
+                } else {
+                    "REJECT"
+                }
+            );
+
+            metadata.process = process.as_str().into();
+            assert_eq!(
+                tunnel
+                    .inner
+                    .resolve_proxy_lazy(&mut metadata)
+                    .await
+                    .unwrap()
+                    .0
+                    .name(),
+                "REJECT"
+            );
+        }
+    }
 
     fn test_tunnel() -> Tunnel {
         let resolver = Arc::new(Resolver::new(
