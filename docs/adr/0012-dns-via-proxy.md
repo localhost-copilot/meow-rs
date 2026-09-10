@@ -1,118 +1,66 @@
-# ADR 0012: Route DNS clients through a proxy adapter (`#PROXY` nameserver suffix)
+# ADR 0012: Route DNS exchanges through live outbounds
 
-- **Status:** Implemented for UDP/TCP (TCP relay), DoT and DoH
-- **Date:** 2026-05-19
-- **Author:** Claude (on behalf of @madeye)
-- **Related:** issue #67, PR #88 (per-proxy DNS for `type: direct`)
+- **Status:** Implemented
+- **Updated:** 2026-09-10
 
-## Context
+## Configuration
 
-Issue #67 has two parts:
+Nameserver fragments name an outbound or group. Encrypted servers retain their
+own TLS identity; an optional `&sni=NAME` overrides it.
 
-1. **"When the rule engine matches a request to a proxy, route the DNS lookup through that proxy."**
-2. **"Allow configuring a dedicated DNS server for a specific proxy or proxy group."**
-
-Part 2 is largely covered today:
-
-- For non-direct outbounds (SS / Trojan / VLESS / HTTP), the **hostname is forwarded to the remote** (`shadowsocks_adapter.rs:295`, `http_adapter.rs:117`, etc.). The remote server performs the DNS lookup, so per-proxy DNS is effectively the remote's resolver.
-- For direct outbounds, PR #88 added a `dns:` field on `type: direct` proxies. The `DirectAdapter` resolves hostnames against the configured servers via an injected `Resolver`.
-- `nameserver-policy` already supports per-domain routing of DNS queries to specific upstreams.
-
-What is **not** covered is the deeper "DNS query routed *through* a proxy adapter" pattern. Upstream Clash / mihomo support a `1.1.1.1#PROXY-NAME` syntax on `nameserver:` entries, where the DNS exchange itself is tunneled through the named proxy's TCP/UDP relay. This lets a user say "ask Google DNS, but go through my Japan exit," which is the classic case for resolving geo-fenced records correctly.
-
-This ADR proposes the syntax, the loop-prevention rules, and the layering for implementing that feature on top of the current `DnsClient` / `Resolver` design.
-
-## Decision
-
-### Syntax
-
-`NameServerEntry` (`crates/meow-dns/src/upstream.rs`) wraps the transport URL and proxy route:
-
-```rust
-NameServerEntry { url: NameServerUrl, proxy: Option<String> }
-```
-
-Surface syntax:
-
-| YAML string | Effect |
+| Nameserver | Transport |
 |---|---|
-| `1.1.1.1` / `1.1.1.1:53` | Plain UDP, global resolver (unchanged) |
-| `1.1.1.1#PROXY-JP` | Plain UDP, **but tunneled over PROXY-JP** |
-| `tcp://1.1.1.1:53#PROXY-JP` | TCP DNS over PROXY-JP |
-| `tls://1.1.1.1#PROXY-JP` | DoT over PROXY-JP, certificate checked against 1.1.1.1 |
-| `tls://1.1.1.1#PROXY-JP&sni=cloudflare-dns.com` | DoT over PROXY-JP with explicit TLS name |
-| `https://1.1.1.1/dns-query#PROXY-JP` | DoH over PROXY-JP |
+| `1.1.1.1#DNS-EXIT` | UDP through DNS-EXIT |
+| `tcp://1.1.1.1#DNS-EXIT` | TCP through DNS-EXIT |
+| `tls://1.1.1.1#DNS-EXIT` | TLS over a TCP connection through DNS-EXIT |
+| `https://dns.example/dns-query#DNS-EXIT` | HTTPS through DNS-EXIT |
+| `tls://1.1.1.1#DNS-EXIT&sni=dns.example` | TLS with an explicit certificate name |
 
-All YAML nameserver entries use mihomo's fragment semantics: a bare fragment names the proxy; `sni=NAME` is a separate fragment parameter. The earlier proposal to interpret encrypted nameserver fragments as SNI caused a configured group name to reach TLS certificate verification and has been superseded. The low-level `NameServerUrl::parse` API retains its explicit SNI form; configuration uses `NameServerEntry::parse`.
+`dns.respect-rules: true` sends untagged main, fallback, and nameserver-policy
+upstreams through the current routing rules and mode. Explicit tags take
+precedence. It requires a nonempty `proxy-server-nameserver`, matching mihomo.
+Bootstrap, proxy-server, and dedicated direct nameservers do not inherit this
+flag. A direct resolver following nameserver-policy shares that policy's routes.
 
-For plain UDP/TCP nameservers (no SNI), the `#PROXY-NAME` suffix reuses the existing fragment slot, matching upstream Clash syntax.
+## Runtime behavior
 
-### Loop prevention
+Configuration validates named outbounds before serving queries. Once the final
+resolver-aware proxy registry exists, DNS clients release their startup adapters
+and use weak references to that registry. A tunnel binds a lookup against its
+current routing snapshot. Selector changes, provider changes, and whole-registry
+reloads therefore affect subsequent uncached DNS exchanges.
 
-DNS-over-proxy creates one hard loop hazard:
+An unavailable configured outbound fails the query. It never silently falls back
+to direct networking or a stale group. Lookups retain no routing locks across
+asynchronous network operations, and weak ownership prevents resolver/proxy cycles.
+Embedders constructing dedicated resolvers should call
+`Tunnel::bind_dns_resolver` to attach them to runtime routing.
 
-> Proxy `A` is configured with `dns: 1.1.1.1#PROXY-A`. To dial proxy A, the system needs to resolve A's server hostname `ss.example.com`. If that lookup is routed through PROXY-A, we re-enter `A.dial_tcp()` before A is dialable → infinite recursion.
+UDP uses the selected adapter's packet connection. Replies must match the
+upstream address and DNS transaction/question. A valid truncated reply retries
+over TCP through the same outbound. Query timeout or cancellation closes the
+packet connection. An adapter without UDP support returns an error.
 
-**Mitigation rules** (enforced at config-parse time, hard error per ADR-0002 Class A — silent breakage in DNS is a privacy failure):
+DoT and DoH wrap the outbound stream with `TlsLayer`; the nameserver certificate
+and HTTP Host name are independent of the proxy server's TLS settings. TLS or
+outbound failures propagate without changing the route.
 
-1. **Proxy-server hostnames must never resolve through a `#PROXY` client.** When the resolver dials a proxy adapter, it must use a *bootstrap* resolver that has no `#PROXY` entries. This is the same bootstrap path that already resolves `dns.google` for an encrypted upstream today (`resolver.rs:354–382`).
+## Bootstrap and recursion
 
-   *Implemented as a runtime fence rather than a retained bootstrap pool.* Since proxy-server hostnames now resolve through the `meow_common::HostResolver` hook (i.e. through this resolver) on every platform, the cycle is detected where it forms: `resolve_addrs` marks its task while the hook runs, and a dial made under that mark — which is exactly a `#PROXY` upstream dialing its own proxy — is answered by `Resolver::resolve_ips_local` (`hosts:` trie + DNS cache, never an upstream query), falling through to the system resolver when nothing is known. This holds the invariant without keeping the throwaway bootstrap clients alive past construction, and without which the resolver's single-flight `inflight` entry would make the inner lookup wait on the outer one.
-2. **Direct cycle detection**: if proxy `A` declares `dns: <anything>#A`, reject the config at load.
-3. **Indirect cycles** (A→B→A) are detected by walking the proxy `dns:` graph at config load. A cycle is a Class A error.
+Nameserver hostnames are resolved during construction using bootstrap clients.
+Proxy server hostnames use the dedicated proxy-server resolver when configured.
+The existing host-resolver hook detects recursive adapter resolution: nested
+lookups consult hosts and cache, then its established system-resolver fallback.
+Operators should avoid proxy-server nameservers whose tagged proxy itself needs
+that same resolver to become reachable.
 
-### Architecture
+Fake-IP synthesis precedes upstream exchanges. Only names excluded from fake-IP
+or explicit real-address lookups reach these transports.
 
-```
-Tunnel → match_rules → Proxy A → A.dial_tcp(metadata)        (data path)
-                                  ^
-                                  └── DnsClient(proxy=A).exchange()
-                                          ^
-                                          └── used by Resolver when YAML has `#A`
-```
+## Verification
 
-The `SocketFactory` indirection in `client.rs:34` returns concrete `TcpStream` / `UdpSocket`. We **do not** generalize the factory; instead `DnsClient` holds an optional `Arc<dyn Proxy>` and branches inside each exchange function:
-
-```rust
-async fn tcp_exchange(addr: SocketAddr, wire: &[u8], proxy: Option<&Arc<dyn Proxy>>) -> ... {
-    let mut stream: Box<dyn AsyncRead + AsyncWrite + Unpin + Send> = match proxy {
-        Some(p) => Box::new(p.dial_tcp(&dns_metadata(addr)).await?),
-        None => Box::new(factory().connect_tcp(addr).await?),
-    };
-    write_lp(&mut stream, wire).await?;
-    read_lp(&mut stream).await
-}
-```
-
-For UDP-via-proxy, fall through to TCP DNS automatically (most proxies don't relay arbitrary UDP). Document this in the config docs — users wanting true UDP-over-proxy must set `udp: true` on the proxy AND use `tcp://` URL form (the TCP fallback is the safer default).
-
-For DoT/DoH, layer `meow_transport::tls::TlsLayer` over the chosen proxy connection. The nameserver's TLS authentication and DoH Host header use its own name, independently of the proxy's TLS settings. A failed proxy or TLS handshake never falls back to direct transport.
-
-### Proxy registry threading
-
-`Resolver` construction (`new_with_bootstrap`) accepts a new `proxy_registry: Arc<HashMap<String, Arc<dyn Proxy>>>` parameter. The resolver resolves `#PROXY-NAME` strings to `Arc<dyn Proxy>` at construction time, failing fast (Class A) if the name is unknown — silent fallback to the global resolver would leak the query.
-
-In `meow-config::build_config`, proxies are constructed before the resolver, so the registry handoff is straightforward.
-
-### What this ADR does NOT cover
-
-- **UDP-native DNS through proxy** when the proxy supports UDP. V1 routes all `#PROXY` queries over TCP. UDP-over-proxy is an optimization that can land later behind a `udp-dns: true` flag.
-- **`fakeip` routing through proxy** — fake-IP synthesis happens *before* the proxy is chosen, so the question is meaningless for fakeip mode.
-- **Per-rule-set DNS routing** (resolve domains in ruleset X via proxy Y). That's `nameserver-policy` territory and is already partially supported.
-
-## Consequences
-
-- One new field per `NameServerUrl` variant, one new `Resolver` constructor parameter, one new optional field on `DnsClient`. The default code path (no `#PROXY`) is unchanged.
-- Two new Class A hard-errors at config load (unknown `#PROXY` name, cycle in `dns:` graph). Both are documented in the config reference.
-- Bootstrap DNS (used to resolve proxy server hostnames) is explicitly a `#PROXY`-free resolver, breaking the loop.
-- Tests need a mock `Proxy` that records the DNS message it was asked to relay; this is straightforward (`crates/meow-dns/tests/proxy_routed_dns_test.rs`).
-
-## Implementation order
-
-1. Extend `NameServerUrl` enum + parser. Behind a temporary `dns-via-proxy` feature flag.
-2. Add `with_proxy` builder on `DnsClient`. Refactor exchange functions to take an optional proxy.
-3. Thread proxy registry into `Resolver::new_with_bootstrap`.
-4. Wire config-load: build proxies first, then resolver, then validate `#PROXY` references.
-5. Cycle detection on the `dns:` graph.
-6. Integration test with a stub `Proxy` adapter.
-7. Remove feature flag; update config reference docs.
+Tunnel tests use local DNS servers to verify live selector changes, registry
+replacement/removal, wildcard policy routing, UDP transaction validation,
+`respect-rules`, explicit-tag precedence, dedicated resolver isolation, and
+release of resolver ownership. Encrypted DNS tests separately cover proxy
+transport and independent TLS authentication.
