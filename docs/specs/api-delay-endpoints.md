@@ -119,6 +119,9 @@ Same query parameters (`url`, `timeout`, `expected`). Success (`200`):
 
 Failed members are omitted, matching mihomo's `GroupBase.URLTest`.
 The map key is the member proxy name, **not** the group name.
+Probes use the group's live adapter snapshot, including provider nodes that
+have no top-level registry entry. Provider replacements affect the next
+manual or periodic group probe, including replacements with the same name.
 
 **Timeout semantics — group-wide, not per-member.** Upstream wraps the
 entire group probe in a single `context.WithTimeout(..., timeout)` and

@@ -2118,6 +2118,56 @@ async fn d1_group_delay_ok_all_members_reported() {
 }
 
 #[tokio::test]
+async fn group_delay_probes_live_provider_members_without_registry_entries() {
+    use meow_proxy::group::{
+        fallback::FallbackGroup, selector::SelectorGroup, urltest::UrlTestGroup,
+    };
+    for kind in ["select", "fallback", "url-test"] {
+        let fixed = TestAdapter::new("fixed", DialBehavior::InstantOk).into_proxy();
+        let old = TestAdapter::new("provider", DialBehavior::InstantOk).into_proxy();
+        let replacement = TestAdapter::new("provider", DialBehavior::InstantOk).into_proxy();
+        let slot: meow_common::ProviderSlot =
+            Arc::new(parking_lot::RwLock::new(vec![Arc::clone(&old)]));
+        let fixed_members = vec![Arc::clone(&fixed)];
+        let slots = vec![Arc::clone(&slot)];
+        let group: Arc<dyn meow_common::Proxy> = match kind {
+            "select" => Arc::new(SelectorGroup::new_with_providers("G", fixed_members, slots)),
+            "fallback" => Arc::new(FallbackGroup::new_with_providers("G", fixed_members, slots)),
+            _ => Arc::new(UrlTestGroup::new_with_providers(
+                "G",
+                fixed_members,
+                50,
+                slots,
+            )),
+        };
+        let app = create_router(state_with_proxies(vec![("G", group)]));
+        for proxy in [&old, &replacement] {
+            *slot.write() = vec![Arc::clone(proxy)];
+            let response = delay_req(
+                app.clone(),
+                format!("/group/G/delay?url={}&timeout=1000", url_q()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{kind}");
+            let result = body_json(response).await;
+            assert_eq!(result.as_object().unwrap().len(), 2, "{kind}");
+            assert!(result["provider"].as_u64().unwrap() > 0, "{kind}");
+        }
+        assert_eq!(
+            old.delay_history().len(),
+            1,
+            "{kind}: removed adapter was probed again"
+        );
+        assert_eq!(
+            replacement.delay_history().len(),
+            1,
+            "{kind}: refreshed adapter was skipped"
+        );
+        assert_eq!(fixed.delay_history().len(), 2, "{kind}");
+    }
+}
+
+#[tokio::test]
 async fn d2_d3_group_delay_404_table() {
     // (case_label, target_name, expect_body_check)
     //

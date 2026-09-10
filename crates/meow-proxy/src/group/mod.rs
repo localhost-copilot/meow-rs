@@ -6,6 +6,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
+fn live_members(
+    fixed: &[Arc<dyn Proxy>],
+    providers: &[meow_common::ProviderSlot],
+    empty_fallback: Option<&Arc<dyn Proxy>>,
+) -> Vec<Arc<dyn Proxy>> {
+    let mut members = fixed.to_vec();
+    for provider in providers {
+        members.extend(provider.read().iter().cloned());
+    }
+    if members.is_empty() {
+        members.extend(empty_fallback.cloned());
+    }
+    members
+}
+
 /// Lock-free traffic-use generation shared by automatic proxy groups. A lazy
 /// health-check loop remembers the last generation it probed and sleeps until
 /// another dial increments this counter.

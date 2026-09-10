@@ -77,13 +77,13 @@ async fn run_health_check_loop(tunnel: Tunnel, spec: HealthCheckSpec) {
             );
             continue;
         }
-        let Some(member_names) = group.members() else {
+        let Some(members) = group.member_proxies() else {
             continue;
         };
 
-        let members: Vec<_> = member_names
+        let members: Vec<_> = members
             .into_iter()
-            .filter_map(|n| proxies.get(n.as_str()).cloned().map(|p| (n, p)))
+            .map(|proxy| (proxy.name().to_owned(), proxy))
             .collect();
         drop(route);
 
@@ -415,6 +415,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn eager_loop_probes_without_use() {
+        use std::sync::Arc;
         let resolver = std::sync::Arc::new(meow_dns::Resolver::new(
             vec![],
             vec![],
@@ -426,21 +427,17 @@ mod tests {
         let tunnel = Tunnel::new(resolver);
         let a = ProbeMock::named("a");
         let b = ProbeMock::named("b");
-        let group = std::sync::Arc::new(meow_proxy::group::fallback::FallbackGroup::new(
-            "lazy-fb",
-            vec![
-                std::sync::Arc::clone(&a) as std::sync::Arc<dyn Proxy>,
-                std::sync::Arc::clone(&b) as std::sync::Arc<dyn Proxy>,
-            ],
-        ));
-        tunnel_with_lazy_fallback(
-            &tunnel,
-            &group,
-            &[
-                ("a", std::sync::Arc::clone(&a)),
-                ("b", std::sync::Arc::clone(&b)),
-            ],
+        let slot: meow_common::ProviderSlot = Arc::new(parking_lot::RwLock::new(vec![
+            Arc::clone(&b) as Arc<dyn Proxy>,
+        ]));
+        let group = std::sync::Arc::new(
+            meow_proxy::group::fallback::FallbackGroup::new_with_providers(
+                "lazy-fb",
+                vec![Arc::clone(&a) as Arc<dyn Proxy>],
+                vec![Arc::clone(&slot)],
+            ),
         );
+        tunnel_with_lazy_fallback(&tunnel, &group, &[("a", Arc::clone(&a))]);
 
         let spec = HealthCheckSpec {
             group_name: "lazy-fb".into(),
@@ -455,6 +452,16 @@ mod tests {
         until(Duration::from_secs(5), || a.dials() >= 1 && b.dials() >= 1).await;
         assert_eq!(a.dials(), 1, "immediate first tick probes unused members");
         assert!(a.last_delay() >= 1);
+
+        let replacement = ProbeMock::named("b");
+        *slot.write() = vec![Arc::clone(&replacement) as Arc<dyn Proxy>];
+        until(Duration::from_secs(3), || replacement.dials() >= 1).await;
+        assert_eq!(
+            b.dials(),
+            1,
+            "removed provider node must not be probed again"
+        );
+        assert!(replacement.last_delay() >= 1);
 
         task.abort();
     }

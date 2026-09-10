@@ -231,6 +231,12 @@ pub trait Proxy: ProxyAdapter {
     fn members(&self) -> Option<Vec<String>> {
         None
     }
+    /// Current group members, including provider-owned adapters. Each call
+    /// takes a fresh snapshot; refreshes affect subsequent calls. Leaf
+    /// adapters return `None`.
+    fn member_proxies(&self) -> Option<Vec<Arc<dyn Proxy>>> {
+        None
+    }
     /// For group adapters: the name of the currently active member
     /// (selected/fastest/first-alive depending on group kind).
     fn current(&self) -> Option<String> {
