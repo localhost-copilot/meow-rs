@@ -1,7 +1,7 @@
 # GNU host build scripts can load libclang; the resulting clients are static musl.
 FROM rust:1.91-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    clang libclang-dev llvm cmake pkg-config perl python3-venv openssl curl \
+    clang libclang-dev llvm cmake pkg-config perl python3-venv openssl libssl-dev libgnutls28-dev curl \
     && rm -rf /var/lib/apt/lists/*
 RUN python3 -m venv /opt/zig && /opt/zig/bin/pip install --no-cache-dir ziglang==0.13.0 \
     && ln -s "$(/opt/zig/bin/python -c 'import pathlib, ziglang; print(pathlib.Path(ziglang.__file__).parent / "zig")')" /usr/local/bin/zig
@@ -10,6 +10,10 @@ ARG RUST_TARGET=aarch64-unknown-linux-musl
 RUN rustup target add "$RUST_TARGET"
 WORKDIR /work
 COPY . .
+RUN cc tests/openconnect/dtls_resumption_server.c -lssl -lcrypto -o /tmp/meow-dtls-resumption-server \
+    && cc tests/openconnect/dtls_legacy_server.c -lgnutls -o /tmp/meow-dtls-legacy-server
+ENV DTLS_RESUMPTION_SERVER=/tmp/meow-dtls-resumption-server
+ENV DTLS_LEGACY_SERVER=/tmp/meow-dtls-legacy-server
 RUN cargo zigbuild --locked --target "$RUST_TARGET" -p meow-openconnect --features dtls --tests \
     && for test in target/$RUST_TARGET/debug/deps/meow_openconnect-* target/$RUST_TARGET/debug/deps/dtls_backend-*; do \
        if [ -x "$test" ] && [ -f "$test" ]; then "$test" --include-ignored || exit 1; fi; done

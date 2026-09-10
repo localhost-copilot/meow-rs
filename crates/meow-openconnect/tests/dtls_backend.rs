@@ -5,6 +5,91 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 
 #[tokio::test]
+#[ignore = "requires DTLS_RESUMPTION_SERVER and DTLS_LEGACY_SERVER built from tests/openconnect/*.c"]
+async fn independent_resumption_cbc_and_legacy_records() {
+    use meow_openconnect::dtls::Cipher;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let executable = std::env::var_os("DTLS_RESUMPTION_SERVER").expect("DTLS_RESUMPTION_SERVER");
+    for (cipher, name, legacy, wrong_key) in [
+        (Cipher::Aes128Gcm, "AES128-GCM-SHA256", false, false),
+        (
+            Cipher::EcdheRsaAes128Gcm,
+            "ECDHE-RSA-AES128-GCM-SHA256",
+            false,
+            false,
+        ),
+        (Cipher::Aes128Sha, "AES128-SHA", false, false),
+        (Cipher::LegacyAes128Sha, "AES128-SHA", true, false),
+        (
+            Cipher::LegacyDheAes256Sha,
+            "DHE-RSA-AES256-SHA",
+            true,
+            false,
+        ),
+        (Cipher::Aes128Gcm, "AES128-GCM-SHA256", false, true),
+        (Cipher::LegacyAes128Sha, "AES128-SHA", true, true),
+    ] {
+        let reservation = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer = reservation.local_addr().unwrap();
+        drop(reservation);
+        let executable = if legacy {
+            std::env::var_os("DTLS_LEGACY_SERVER").expect("DTLS_LEGACY_SERVER")
+        } else {
+            executable.clone()
+        };
+        let mut server = tokio::process::Command::new(&executable)
+            .args([
+                peer.port().to_string(),
+                name.into(),
+                u8::from(legacy).to_string(),
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        BufReader::new(server.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .await
+            .unwrap();
+        assert_eq!(ready, "READY\n");
+        let result = Channel::connect(
+            peer,
+            Key::Resume {
+                secret: zeroize::Zeroizing::new([if wrong_key { 0x38 } else { 0x39 }; 48]),
+                session_id: vec![0x42; 32],
+                cipher,
+            },
+            1400,
+            Duration::from_secs(3),
+        )
+        .await;
+        if wrong_key {
+            assert!(result.is_err(), "{name} accepted an unauthenticated key");
+            let _ = server.kill().await;
+            server.wait().await.unwrap();
+            continue;
+        }
+        let mut channel = result.unwrap_or_else(|error| panic!("{name} legacy={legacy}: {error}"));
+        assert_eq!(channel.cipher(), name);
+        for size in [1, 1400, 39] {
+            let payload = vec![0x53; size];
+            channel.send(&payload).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(3), channel.recv())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                payload
+            );
+        }
+        server.kill().await.unwrap();
+        server.wait().await.unwrap();
+    }
+}
+
+#[tokio::test]
 #[ignore = "requires the OpenSSL 3 command-line server"]
 async fn independent_openssl_psk_datagrams() {
     use std::process::Stdio;
@@ -97,7 +182,10 @@ async fn independent_openssl_psk_datagrams() {
 async fn blackhole_retransmits_app_id_and_obeys_deadline() {
     let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let peer = sink.local_addr().unwrap();
-    let connect = Channel::connect(
+    let local = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let local_port = local.local_addr().unwrap().port();
+    drop(local);
+    let connect = Channel::connect_bound(
         peer,
         Key::Psk {
             secret: zeroize::Zeroizing::new([0x39; 32]),
@@ -105,6 +193,7 @@ async fn blackhole_retransmits_app_id_and_obeys_deadline() {
         },
         1280,
         Duration::from_millis(1500),
+        local_port,
     );
     tokio::pin!(connect);
     let mut hellos = 0;
@@ -117,8 +206,9 @@ async fn blackhole_retransmits_app_id_and_obeys_deadline() {
                 assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
                 break;
             }
-            result = sink.recv(&mut packet) => {
-                let n = result.unwrap();
+            result = sink.recv_from(&mut packet) => {
+                let (n, sender) = result.unwrap();
+                assert_eq!(sender.port(), local_port);
                 // DTLS record (13), handshake header (12), client version (2),
                 // random (32), then the session-ID length and bytes.
                 assert!(n >= 92);

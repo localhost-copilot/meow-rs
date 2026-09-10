@@ -5,8 +5,6 @@ use meow_common::{
     AdapterType, MeowError, Metadata, ProxyAdapter, ProxyConn, ProxyHealth, ProxyPacketConn, Result,
 };
 use meow_netstack::Stack;
-use meow_transport::tls::{TlsConfig, TlsLayer};
-use meow_transport::Transport;
 use parking_lot::Mutex;
 use std::io;
 use std::net::SocketAddr;
@@ -19,9 +17,60 @@ use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 pub use meow_openconnect::auth::Credentials;
+pub use meow_openconnect::auth::{AuthOptions, FormEntry};
 pub use meow_openconnect::DtlsMode;
 
 mod dns;
+mod tls;
+mod underlay;
+pub use meow_openconnect::compression::Mode as Compression;
+pub use meow_openconnect::token::Token;
+pub use meow_openconnect::{
+    settings::{ClientProfile, Mobile},
+    ConnectSettings,
+};
+pub use tls::TlsOptions;
+pub use underlay::{IpVersion, NetworkOptions};
+
+pub struct AdvancedOptions {
+    pub dialer: Arc<dyn crate::dialer::TcpDialer>,
+    pub network: NetworkOptions,
+    pub tls: TlsOptions,
+    pub auth: AuthOptions,
+    pub connection: ConnectSettings,
+    pub queue_length: usize,
+    pub dtls_resumption_only: bool,
+    pub legacy_dtls: bool,
+    pub dtls_local_port: u16,
+    pub reconnect_timeout: Duration,
+}
+
+impl Default for AdvancedOptions {
+    fn default() -> Self {
+        Self {
+            dialer: Arc::new(crate::dialer::DirectDialer),
+            network: NetworkOptions::default(),
+            tls: TlsOptions::default(),
+            auth: AuthOptions::default(),
+            connection: ConnectSettings::default(),
+            queue_length: 32,
+            dtls_resumption_only: false,
+            legacy_dtls: true,
+            dtls_local_port: 0,
+            reconnect_timeout: Duration::from_secs(300),
+        }
+    }
+}
+
+fn validate_header(value: &str) -> io::Result<()> {
+    if value.len() > 4096 || value.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid OpenConnect header value",
+        ));
+    }
+    Ok(())
+}
 
 /// Authentication and TLS options are intentionally not Debug-printable.
 pub struct Options {
@@ -42,7 +91,9 @@ pub struct Options {
 
 struct Parameters {
     options: Options,
-    tls: TlsLayer,
+    advanced: AdvancedOptions,
+    tls: tls::Connector,
+    underlay: Arc<underlay::Underlay>,
 }
 
 struct Session {
@@ -83,6 +134,26 @@ pub struct OpenConnectAdapter {
 
 impl OpenConnectAdapter {
     pub fn new(name: &str, options: Options) -> io::Result<Self> {
+        Self::new_configured(name, options, AdvancedOptions::default())
+    }
+
+    pub fn new_configured(
+        name: &str,
+        options: Options,
+        mut advanced: AdvancedOptions,
+    ) -> io::Result<Self> {
+        if let Some(identity) = tls::McaIdentity::new(&advanced.tls)? {
+            advanced.auth.mca = Some(Arc::new(identity));
+        }
+        advanced.connection.profile.validate()?;
+        advanced.network.validate()?;
+        advanced.auth.validate()?;
+        if !(1..=4096).contains(&advanced.queue_length) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "queue-length must be between 1 and 4096",
+            ));
+        }
         if options.dtls_mode != DtlsMode::Off && !cfg!(all(feature = "openconnect-dtls", unix)) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -93,8 +164,6 @@ impl OpenConnectAdapter {
             || options.server.is_empty()
             || options.port == 0
             || options.server_name.is_empty()
-            || options.handshake_timeout.is_zero()
-            || options.handshake_timeout > Duration::from_secs(300)
             || options
                 .server
                 .bytes()
@@ -102,7 +171,7 @@ impl OpenConnectAdapter {
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "invalid OpenConnect endpoint or handshake timeout",
+                "invalid OpenConnect endpoint",
             ));
         }
         let address = if options.server.contains(':') {
@@ -116,7 +185,7 @@ impl OpenConnectAdapter {
                 .cookie
                 .clone()
                 .unwrap_or_else(|| "authenticated-cookie".into()),
-            mtu: options.mtu,
+            mtu: if options.mtu == 0 { 1280 } else { options.mtu },
             ipv6: options.ipv6,
         };
         request.validate()?;
@@ -135,24 +204,36 @@ impl OpenConnectAdapter {
         }
         match (&options.cookie, &options.credentials) {
             (Some(_), None) => {}
-            (None, Some(credentials)) => credentials.validate()?,
+            (None, Some(credentials))
+                if !credentials.username.is_empty() || !advanced.tls.certificate.is_empty() =>
+            {
+                credentials.validate()?;
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "OpenConnect requires either cookie or username/password",
+                    "OpenConnect requires a cookie, username or client certificate",
                 ))
             }
         }
-        let tls = TlsLayer::new(&TlsConfig {
-            additional_roots: options.additional_roots.clone(),
-            alpn: vec!["http/1.1".into()],
-            ..TlsConfig::new(options.server_name.clone())
-        })
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        let tls = tls::Connector::new(
+            &options.server_name,
+            &options.additional_roots,
+            &advanced.tls,
+        )?;
+        let underlay = Arc::new(underlay::Underlay {
+            dialer: Arc::clone(&advanced.dialer),
+            options: advanced.network.clone(),
+        });
         Ok(Self {
             name: name.to_owned(),
             address,
-            parameters: Arc::new(Parameters { options, tls }),
+            parameters: Arc::new(Parameters {
+                options,
+                advanced,
+                tls,
+                underlay,
+            }),
             shared: Arc::new(Shared {
                 init: Mutex::new(Init::Idle),
                 cancel: CancellationToken::new(),
@@ -202,18 +283,40 @@ impl OpenConnectAdapter {
 async fn supervise(parameters: &Parameters, sender: watch::Sender<Option<SessionResult>>) {
     let mut generation = 0u64;
     let mut failures = 0u32;
+    let mut retry_deadline: Option<tokio::time::Instant> = None;
     loop {
+        if retry_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+            sender.send_replace(Some(Err(
+                "OpenConnect reconnect timeout reached; reload node to retry".into(),
+            )));
+            return;
+        }
         if failures > 0 {
-            tokio::time::sleep(Duration::from_secs(1 << (failures - 1).min(4))).await;
+            let retry = tokio::time::Instant::now()
+                + Duration::from_millis((250u64 << (failures - 1).min(7)).min(30_000));
+            tokio::time::sleep_until(retry_deadline.map_or(retry, |deadline| deadline.min(retry)))
+                .await;
+            if retry_deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+                continue;
+            }
         }
         generation += 1;
-        let result = tokio::time::timeout(
-            parameters.options.handshake_timeout,
-            establish(parameters, generation),
-        )
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "OpenConnect handshake timed out"))
-        .and_then(|result| result);
+        let handshake_deadline = (!parameters.options.handshake_timeout.is_zero())
+            .then(|| tokio::time::Instant::now() + parameters.options.handshake_timeout);
+        let deadline = match (handshake_deadline, retry_deadline) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let result = if let Some(deadline) = deadline {
+            tokio::time::timeout_at(deadline, establish(parameters, generation))
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "OpenConnect handshake timed out")
+                })
+                .and_then(|result| result)
+        } else {
+            establish(parameters, generation).await
+        };
         match result {
             Ok(session) => {
                 let started = tokio::time::Instant::now();
@@ -229,11 +332,9 @@ async fn supervise(parameters: &Parameters, sender: watch::Sender<Option<Session
                 } else {
                     failures + 1
                 };
-                if failures >= 5 {
-                    sender.send_replace(Some(Err(
-                        "OpenConnect reconnect limit reached; reload node to retry".into(),
-                    )));
-                    return;
+                if started.elapsed() >= Duration::from_secs(30) || retry_deadline.is_none() {
+                    retry_deadline =
+                        Some(tokio::time::Instant::now() + parameters.advanced.reconnect_timeout);
                 }
             }
             Err(error) => {
@@ -244,17 +345,14 @@ async fn supervise(parameters: &Parameters, sender: watch::Sender<Option<Session
                         | io::ErrorKind::InvalidData
                         | io::ErrorKind::InvalidInput
                         | io::ErrorKind::Unsupported
-                ) || failures >= 5
-                {
-                    let reason = if failures >= 5 {
-                        format!(
-                            "OpenConnect failed after 5 attempts; reload node to retry: {error}"
-                        )
-                    } else {
-                        error.to_string()
-                    };
+                ) {
+                    let reason = error.to_string();
                     sender.send_replace(Some(Err(reason.into())));
                     return;
+                }
+                if retry_deadline.is_none() {
+                    retry_deadline =
+                        Some(tokio::time::Instant::now() + parameters.advanced.reconnect_timeout);
                 }
                 tracing::debug!(
                     generation,
@@ -267,23 +365,16 @@ async fn supervise(parameters: &Parameters, sender: watch::Sender<Option<Session
 }
 
 async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<Session>> {
-    let tcp =
-        meow_common::connect_tcp_host(&parameters.options.server, parameters.options.port).await?;
-    tcp.set_nodelay(true)?;
-    #[cfg(all(feature = "openconnect-dtls", unix))]
-    let peer = tcp.peer_addr()?.ip();
-    let tls = parameters
-        .tls
-        .connect(Box::new(tcp))
-        .await
-        .map_err(|e| match e {
-            meow_transport::TransportError::Io(error) => error,
-            // TLS verification/configuration errors cannot be repaired by retrying.
-            _ => io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("OpenConnect TLS: {e}"),
-            ),
-        })?;
+    let (peer, mut tcp) = parameters
+        .underlay
+        .tcp(&parameters.options.server, parameters.options.port)
+        .await?;
+    let mut settings = parameters.advanced.connection.clone();
+    if settings.base_mtu == 0 {
+        settings.base_mtu = underlay::probe_mtu(tcp.as_mut()).unwrap_or(1406);
+    }
+    settings.base_mtu = settings.base_mtu.max(1280);
+    let tls = parameters.tls.connect(tcp).await?;
     let authority = if parameters.options.server.contains(':') {
         format!(
             "[{}]:{}",
@@ -293,7 +384,21 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
         format!("{}:{}", parameters.options.server, parameters.options.port)
     };
     let (tls, cookie) = if let Some(credentials) = &parameters.options.credentials {
-        meow_openconnect::auth::authenticate(tls, &authority, credentials).await?
+        meow_openconnect::auth::authenticate_configured(
+            tls,
+            &authority,
+            credentials,
+            &parameters.advanced.connection.profile,
+            &parameters.advanced.auth,
+            || async {
+                let tcp = parameters
+                    .underlay
+                    .tcp_addr(SocketAddr::new(peer, parameters.options.port))
+                    .await?;
+                parameters.tls.connect(tcp).await
+            },
+        )
+        .await?
     } else {
         (
             tokio::io::BufReader::new(tls),
@@ -307,7 +412,12 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
     let request = meow_openconnect::Options {
         authority,
         cookie,
-        mtu: parameters.options.mtu,
+        mtu: if parameters.options.mtu == 0 {
+            (settings.base_mtu - if peer.is_ipv6() { 130 } else { 110 })
+                .max(if parameters.options.ipv6 { 1280 } else { 576 })
+        } else {
+            parameters.options.mtu
+        },
         ipv6: parameters.options.ipv6,
     };
     #[cfg(all(feature = "openconnect-dtls", unix))]
@@ -327,7 +437,11 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
                 .map_err(|_| io::Error::other("OpenConnect TLS exporter unavailable"))
             });
             match offer {
-                Ok(offer) => Some(offer),
+                Ok(offer) => Some(
+                    offer
+                        .resumption_only(parameters.advanced.dtls_resumption_only)
+                        .legacy(parameters.advanced.legacy_dtls),
+                ),
                 Err(error) if mode == DtlsMode::Auto => {
                     tracing::debug!(%error, "OpenConnect DTLS backend unavailable; using CSTP");
                     None
@@ -335,11 +449,22 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
                 Err(error) => return Err(error),
             }
         };
-        let mut connection =
-            meow_openconnect::connect_with_dtls(tls, &request, offer.as_ref()).await?;
+        let mut connection = meow_openconnect::connect_configured_with_dtls(
+            tls,
+            &request,
+            &settings,
+            offer.as_ref(),
+        )
+        .await?;
         let negotiated = std::mem::replace(&mut connection.dtls, Ok(None));
         let dtls = match negotiated {
-            Ok(Some(settings)) => {
+            Ok(Some(mut settings)) => {
+                settings.local_port = parameters.advanced.dtls_local_port;
+                settings.connector = Some(Arc::clone(&parameters.underlay)
+                    as Arc<dyn meow_openconnect::dtls::DatagramConnector>);
+                if !parameters.advanced.connection.dpd_interval.is_zero() {
+                    settings.dpd = parameters.advanced.connection.dpd_interval;
+                }
                 // Fix one MTU for the whole control generation so switching
                 // transports never changes existing TCP segmentation limits.
                 connection.network.mtu = settings.mtu;
@@ -361,9 +486,9 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
         (connection, dtls)
     };
     #[cfg(not(all(feature = "openconnect-dtls", unix)))]
-    let connection = meow_openconnect::connect(tls, &request).await?;
-    let (to_stack, incoming) = mpsc::channel(64);
-    let (outgoing, from_stack) = mpsc::channel(64);
+    let connection = meow_openconnect::connect_configured(tls, &request, &settings).await?;
+    let (to_stack, incoming) = mpsc::channel(parameters.advanced.queue_length);
+    let (outgoing, from_stack) = mpsc::channel(parameters.advanced.queue_length);
     let tcp_send_budget = usize::MAX;
     #[cfg(all(feature = "openconnect-dtls", unix))]
     let tcp_send_budget = if dtls.is_some() {
@@ -434,7 +559,7 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
         stack,
         network,
         cancel,
-        dns: dns::Resolver::new(servers),
+        dns: dns::Resolver::new(servers, parameters.advanced.network.ip_version),
     });
     #[cfg(all(feature = "openconnect-dtls", unix))]
     if mode == DtlsMode::Require {
@@ -450,7 +575,11 @@ async fn establish(parameters: &Parameters, generation: u64) -> io::Result<Arc<S
     Ok(session)
 }
 
-async fn destination(metadata: &Metadata, stack: &Stack) -> Result<SocketAddr> {
+async fn destination(
+    metadata: &Metadata,
+    stack: &Stack,
+    ip_version: IpVersion,
+) -> Result<SocketAddr> {
     if let Some(ip) = metadata.dst_ip.filter(|ip| stack.supports(*ip)) {
         return Ok(SocketAddr::new(ip, metadata.dst_port));
     }
@@ -459,8 +588,9 @@ async fn destination(metadata: &Metadata, stack: &Stack) -> Result<SocketAddr> {
             "OpenConnect destination requires a negotiated address family or hostname".into(),
         ));
     }
-    meow_common::resolve_host_all(&metadata.host, metadata.dst_port)
-        .await?
+    let mut addresses = meow_common::resolve_host_all(&metadata.host, metadata.dst_port).await?;
+    ip_version.select(&mut addresses);
+    addresses
         .into_iter()
         .find(|address| stack.supports(address.ip()))
         .ok_or_else(|| MeowError::Dns("OpenConnect target has no negotiated address family".into()))
@@ -491,7 +621,12 @@ impl ProxyAdapter for OpenConnectAdapter {
                 .resolve(&session.stack, &metadata.host, metadata.dst_port)
                 .await?
         } else {
-            destination(metadata, &session.stack).await?
+            destination(
+                metadata,
+                &session.stack,
+                self.parameters.advanced.network.ip_version,
+            )
+            .await?
         };
         let stream = session.stack.connect(target).await?;
         Ok(Box::new(Connection {

@@ -13,6 +13,9 @@ use tokio_util::sync::CancellationToken;
 const HEADER_LIMIT: usize = 32768;
 
 pub mod auth;
+pub mod compression;
+pub mod settings;
+pub mod token;
 
 #[cfg(feature = "dtls")]
 pub mod dtls;
@@ -45,8 +48,8 @@ impl Options {
                 "CSTP authority and cookie must be nonempty and contain no control characters",
             ));
         }
-        if !(576..=1500).contains(&self.mtu) {
-            return Err(invalid("CSTP MTU must be between 576 and 1500"));
+        if self.mtu < 576 {
+            return Err(invalid("CSTP MTU must be between 576 and 65535"));
         }
         if self.ipv6 && self.mtu < 1280 {
             return Err(invalid("IPv6 requires an MTU of at least 1280"));
@@ -81,8 +84,17 @@ pub struct Connection<S> {
     pub network: NetworkConfig,
     dpd: Duration,
     keepalive: Duration,
+    compression: compression::Encoding,
     #[cfg(feature = "dtls")]
     pub dtls: io::Result<Option<dtls::Parameters>>,
+}
+
+#[derive(Clone, Default)]
+pub struct ConnectSettings {
+    pub profile: settings::ClientProfile,
+    pub base_mtu: u16,
+    pub dpd_interval: Duration,
+    pub compression: compression::Mode,
 }
 
 pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
@@ -92,6 +104,7 @@ pub async fn connect<S: AsyncRead + AsyncWrite + Unpin>(
     connect_inner(
         stream,
         options,
+        &ConnectSettings::default(),
         #[cfg(feature = "dtls")]
         None,
     )
@@ -104,30 +117,59 @@ pub async fn connect_with_dtls<S: AsyncRead + AsyncWrite + Unpin>(
     options: &Options,
     offer: Option<&dtls::Offer>,
 ) -> io::Result<Connection<S>> {
-    connect_inner(stream, options, offer).await
+    connect_inner(stream, options, &ConnectSettings::default(), offer).await
+}
+
+pub async fn connect_configured<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    options: &Options,
+    settings: &ConnectSettings,
+) -> io::Result<Connection<S>> {
+    connect_inner(
+        stream,
+        options,
+        settings,
+        #[cfg(feature = "dtls")]
+        None,
+    )
+    .await
+}
+
+#[cfg(feature = "dtls")]
+pub async fn connect_configured_with_dtls<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    options: &Options,
+    settings: &ConnectSettings,
+    offer: Option<&dtls::Offer>,
+) -> io::Result<Connection<S>> {
+    connect_inner(stream, options, settings, offer).await
 }
 
 async fn connect_inner<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     options: &Options,
+    settings: &ConnectSettings,
     #[cfg(feature = "dtls")] offer: Option<&dtls::Offer>,
 ) -> io::Result<Connection<S>> {
     options.validate()?;
+    settings.profile.validate()?;
     let cookie = if options.cookie.starts_with("webvpn=") {
         options.cookie.clone()
     } else {
         format!("webvpn={}", options.cookie)
     };
     #[cfg(feature = "dtls")]
-    let dtls_headers = offer.map(dtls::Offer::headers).unwrap_or_default();
+    let dtls_headers = offer
+        .map(|offer| offer.headers(settings.compression))
+        .unwrap_or_default();
     #[cfg(feature = "dtls")]
     let dtls_text: &str = &dtls_headers;
     #[cfg(not(feature = "dtls"))]
     let dtls_text = "";
     let request = format!(
-        "CONNECT /CSCOSSLC/tunnel HTTP/1.1\r\nHost: {}\r\nUser-Agent: meow-rs\r\nCookie: {cookie}\r\nX-CSTP-Version: 1\r\nX-CSTP-MTU: {}\r\nX-CSTP-Address-Type: {}\r\nX-CSTP-Accept-Encoding: identity\r\n{}\r\n",
-        options.authority, options.mtu, if options.ipv6 { "IPv4,IPv6" } else { "IPv4" },
-        dtls_text,
+        "CONNECT /CSCOSSLC/tunnel HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nCookie: {cookie}\r\nX-CSTP-Version: 1\r\nX-CSTP-Base-MTU: {}\r\nX-CSTP-MTU: {}\r\nX-CSTP-Address-Type: {}\r\nX-CSTP-Accept-Encoding: {}\r\n{}{}{}\r\n",
+        options.authority, settings.profile.user_agent, settings.base_mtu.max(1280), options.mtu, if options.ipv6 { "IPv4,IPv6" } else { "IPv4" },
+        settings.compression.offer(false), if options.ipv6 { "X-CSTP-Full-IPv6-Capability: true\r\n" } else { "" }, settings.profile.headers(), dtls_text,
     );
     #[cfg(feature = "dtls")]
     let request = zeroize::Zeroizing::new(request);
@@ -135,6 +177,7 @@ async fn connect_inner<S: AsyncRead + AsyncWrite + Unpin>(
     stream.flush().await?;
     let mut stream = BufReader::new(stream);
     let mut remaining = HEADER_LIMIT;
+    let mut compression = None;
     let status = header_line(&mut stream, &mut remaining).await?;
     let mut parts = status.split_whitespace();
     if !matches!(parts.next(), Some("HTTP/1.1" | "HTTP/1.0")) {
@@ -219,8 +262,13 @@ async fn connect_inner<S: AsyncRead + AsyncWrite + Unpin>(
                     return Err(invalid("invalid or duplicate CSTP MTU"));
                 }
             }
-            "x-cstp-content-encoding" if value != "identity" => {
-                return Err(invalid("CSTP compression is not supported"))
+            "x-cstp-content-encoding" => {
+                if compression
+                    .replace(settings.compression.negotiate(value, false)?)
+                    .is_some()
+                {
+                    return Err(invalid("duplicate CSTP compression header"));
+                }
             }
             "x-cstp-dpd" => dpd = interval(value)?,
             "x-cstp-keepalive" => keepalive = interval(value)?,
@@ -251,11 +299,18 @@ async fn connect_inner<S: AsyncRead + AsyncWrite + Unpin>(
             dns,
             mtu,
         },
-        dpd,
+        dpd: if settings.dpd_interval.is_zero() {
+            dpd
+        } else {
+            settings.dpd_interval
+        },
         keepalive,
+        compression: compression.unwrap_or_default(),
         #[cfg(feature = "dtls")]
         dtls: match offer {
-            Some(offer) => dtls_headers.negotiate(offer, mtu, address6.is_some()),
+            Some(offer) => {
+                dtls_headers.negotiate(offer, mtu, address6.is_some(), settings.compression)
+            }
             None => Ok(None),
         },
     })
@@ -323,14 +378,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         let (control_tx, mut control_rx) = mpsc::channel(8);
         let epoch = Instant::now();
         let last_received = AtomicU64::new(0);
+        let mut decoder = compression::Decoder::new(self.compression);
+        let mut encoder = compression::Encoder::new(self.compression);
         let read = async {
             loop {
-                let (kind, payload) = read_frame(&mut reader, self.network.mtu).await?;
+                let (kind, payload) = read_frame(
+                    &mut reader,
+                    if self.compression == compression::Encoding::Identity {
+                        self.network.mtu
+                    } else {
+                        u16::MAX
+                    },
+                )
+                .await?;
                 last_received.store(epoch.elapsed().as_secs(), Ordering::Relaxed);
                 match kind {
                     0 => {
                         self.network.validate_packet(&payload)?;
                         incoming.send(payload).await.map_err(|_| closed())?;
+                    }
+                    8 => {
+                        let packet = decoder.decode(&payload, self.network.mtu)?;
+                        self.network.validate_packet(&packet)?;
+                        incoming.send(packet).await.map_err(|_| closed())?;
                     }
                     3 => control_tx.send(4).await.map_err(|_| closed())?,
                     4 | 7 => {}
@@ -365,6 +435,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                 };
                 if kind == 0 {
                     self.network.validate_packet(&payload)?;
+                    if let Some(compressed) = encoder.encode(&payload)? {
+                        write_frame(&mut writer, 8, &compressed).await?;
+                        continue;
+                    }
                 }
                 write_frame(&mut writer, kind, &payload).await?;
             }

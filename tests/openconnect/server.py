@@ -41,10 +41,13 @@ dns = 192.0.2.1
 route = default
 cisco-client-compat = {os.environ.get("OCSERV_CISCO_COMPAT", "true")}
 mtu = 1400
-compression = false
+compression = {os.environ.get("OCSERV_COMPRESSION", "false")}
 select-group = engineering[Engineering]
 ''')
-    if os.environ.get("OCSERV_CISCO_COMPAT") == "false":
+    if os.environ.get("OCSERV_LEGACY_DTLS") == "true":
+        config.write('dtls-psk = false\n')
+        config.write('tls-priorities = "NORMAL:%SERVER_PRECEDENCE:-VERS-TLS1.3:-CIPHER-ALL:+AES-128-CBC"\n')
+    elif os.environ.get("OCSERV_CISCO_COMPAT") == "false":
         # Both kernels support this AEAD; fix it for comparable crypto costs.
         config.write('tls-priorities = "NORMAL:%SERVER_PRECEDENCE:-CIPHER-ALL:+AES-128-GCM"\n')
 
