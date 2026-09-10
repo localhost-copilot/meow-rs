@@ -213,7 +213,8 @@ pub struct Resolver {
     /// Singleflight registries, one per queried family set — see
     /// [`InflightMap`].
     inflight: [InflightMap; 3],
-    policy: Option<NameserverPolicy>,
+    policy: Option<Arc<NameserverPolicy>>,
+    direct_resolver: Option<Arc<Resolver>>,
     fallback_filter: Option<FallbackFilter>,
     /// IPv4 fake-IP pool (None when fake-ip mode is disabled or only v6 is configured).
     fakeip_v4: Option<Arc<Pool>>,
@@ -225,7 +226,7 @@ pub struct Resolver {
     /// TTL stamped on synthesised A/AAAA responses. Short by design so
     /// clients re-query rather than caching a fake IP after pool eviction.
     fakeip_ttl: Duration,
-    /// Whether IPv6 resolution is enabled. Driven by the top-level `ipv6`
+    /// Whether IPv6 resolution is enabled. Driven by the `dns.ipv6`
     /// config flag and fixed at construction time.
     ipv6: bool,
 }
@@ -589,6 +590,18 @@ async fn query_pool_generic(
 }
 
 impl Resolver {
+    /// Dedicated real-address resolver for DIRECT outbounds. Sharing policy
+    /// does not share caches or fake-IP allocations with the client resolver.
+    pub fn set_direct_resolver(&mut self, mut resolver: Resolver, follow_policy: bool) {
+        if follow_policy {
+            resolver.policy = self.policy.clone();
+        }
+        self.direct_resolver = Some(Arc::new(resolver));
+    }
+
+    pub fn direct_resolver(&self) -> Option<&Arc<Resolver>> {
+        self.direct_resolver.as_ref()
+    }
     /// Select the answer eviction policy before serving queries. Existing
     /// entries are discarded; reverse snooping starts empty with the resolver.
     pub fn set_cache_algorithm(&mut self, algorithm: crate::cache::CacheAlgorithm) {
@@ -638,6 +651,7 @@ impl Resolver {
             use_hosts,
             inflight: [DashMap::new(), DashMap::new(), DashMap::new()],
             policy: None,
+            direct_resolver: None,
             fallback_filter: None,
             fakeip_v4: None,
             fakeip_v6: None,
@@ -874,7 +888,8 @@ impl Resolver {
             hosts,
             use_hosts,
             inflight: [DashMap::new(), DashMap::new(), DashMap::new()],
-            policy,
+            policy: policy.map(Arc::new),
+            direct_resolver: None,
             fallback_filter,
             fakeip_v4: None,
             fakeip_v6: None,
