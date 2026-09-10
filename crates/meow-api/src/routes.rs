@@ -589,6 +589,8 @@ async fn close_connection(
 
 #[derive(Serialize)]
 struct ConfigResponse {
+    #[serde(rename = "tcp-concurrent")]
+    tcp_concurrent: bool,
     #[serde(rename = "unified-delay")]
     unified_delay: bool,
     mode: String,
@@ -625,6 +627,7 @@ struct ConfigResponse {
 async fn get_configs(State(state): State<Arc<AppState>>) -> Json<ConfigResponse> {
     let raw = state.raw_config.read();
     Json(ConfigResponse {
+        tcp_concurrent: raw.tcp_concurrent.unwrap_or(false),
         unified_delay: raw.unified_delay.unwrap_or(false),
         mode: state.tunnel.mode().to_string(),
         log_level: raw.log_level.clone().unwrap_or_else(|| "info".to_string()),
@@ -646,6 +649,8 @@ async fn get_configs(State(state): State<Arc<AppState>>) -> Json<ConfigResponse>
 
 #[derive(Deserialize)]
 struct UpdateConfigRequest {
+    #[serde(rename = "tcp-concurrent")]
+    tcp_concurrent: Option<bool>,
     #[serde(rename = "unified-delay")]
     unified_delay: Option<bool>,
     mode: Option<String>,
@@ -673,6 +678,10 @@ async fn update_configs(
 
     // Both valid — apply atomically.
     let mut raw = state.raw_config.write();
+    if let Some(enabled) = body.tcp_concurrent {
+        meow_common::dial::set_tcp_concurrent(enabled);
+        raw.tcp_concurrent = Some(enabled);
+    }
     if let Some(enabled) = body.unified_delay {
         meow_proxy::health::set_unified_delay(enabled);
         raw.unified_delay = Some(enabled);
@@ -1791,6 +1800,7 @@ async fn spawn_tun_from_raw(
 async fn swap_config_and_reconcile_tun(state: &AppState, candidate: RawConfig) {
     let _guard = state.config_mutation_lock.lock().await;
     meow_proxy::health::set_unified_delay(candidate.unified_delay.unwrap_or(false));
+    meow_common::dial::set_tcp_concurrent(candidate.tcp_concurrent.unwrap_or(false));
 
     let new_enable = candidate.tun.as_ref().is_some_and(|t| t.enable);
     // Snapshot the candidate (only on an off→on transition, before it is

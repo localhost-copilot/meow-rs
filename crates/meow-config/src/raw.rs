@@ -125,6 +125,7 @@ pub struct RawGeoDataUrls {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawConfig {
+    pub tcp_concurrent: Option<bool>,
     pub unified_delay: Option<bool>,
     pub profile: Option<RawProfile>,
     pub port: Option<u16>,

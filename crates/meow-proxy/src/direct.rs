@@ -81,10 +81,9 @@ impl DirectAdapter {
     async fn resolve_targets(&self, metadata: &Metadata) -> Result<Vec<SocketAddr>> {
         // 1. Destination already resolved (e.g. by rule-matching pre_resolve,
         //    or when the client supplied an IP literal).
-        if let Some(ip) = metadata
-            .dst_ip
-            .filter(|_| !self.resolve_again || metadata.host.is_empty())
-        {
+        if let Some(ip) = metadata.dst_ip.filter(|_| {
+            !(self.resolve_again || meow_common::dial::tcp_concurrent()) || metadata.host.is_empty()
+        }) {
             return Ok(vec![SocketAddr::new(ip, metadata.dst_port)]);
         }
 
@@ -303,22 +302,19 @@ impl ProxyAdapter for DirectAdapter {
 
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>> {
         let dests = self.resolve_targets(metadata).await?;
-        let mut last_err = None;
-
-        for dest in dests {
-            match apply_connect_timeout(
-                connect_with_mark(dest, self.routing_mark),
-                self.connect_timeout,
-                dest,
-            )
-            .await
-            {
-                Ok(stream) => return Ok(Box::new(DirectConn(stream))),
-                Err(err) => last_err = Some(err),
-            }
-        }
-
-        Err(last_err.unwrap_or_else(|| MeowError::Proxy("direct: no reachable address".into())))
+        let stream = meow_common::dial::connect_candidates(
+            &dests,
+            meow_common::dial::tcp_concurrent(),
+            |dest| {
+                apply_connect_timeout(
+                    connect_with_mark(dest, self.routing_mark),
+                    self.connect_timeout,
+                    dest,
+                )
+            },
+        )
+        .await?;
+        Ok(Box::new(DirectConn(stream)))
     }
 
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
