@@ -143,7 +143,7 @@ Field reference:
 | 4 | Unknown `flow` value — upstream ignores | A | An unknown flow might skip expected security processing. Hard-error. |
 | 5 | `encryption: <non-none>` — upstream hard-errors too | — | Both hard-error; this is a match, not a divergence. |
 | 6 | `mux: { enabled: true }` — upstream runs Mux.Cool | B | Not implemented; warn-once and ignore. User gets same destination, just no muxing. |
-| 7 | `flow: xtls-rprx-vision` + `udp: true` — Vision TCP-only, UDP silently uses plain VLESS upstream | B | Warn-once at config load; UDP relay still routes to the same destination with outer-TLS guarantees. Not Class A because crypto and routing are unchanged on the UDP path. |
+| 7 | `flow: xtls-rprx-vision` + `udp: true` | — | Uses CommandMux + XUDP with the configured Vision flow, matching mihomo. The earlier plain-UDP divergence is removed. |
 
 ## Wire format
 
@@ -313,19 +313,10 @@ and the vision-splice logic orthogonal.
 - Vision does **not** require the application to be doing TLS — it
   falls through to pass-through if the first 5 bytes are not a TLS
   record header. No error at runtime, just a `trace!` log.
-- `flow: xtls-rprx-vision` + `udp: true` — Vision is TCP-only.
-  `dial_udp` ignores `flow` and uses plain `VlessConn`. **Warn-once
-  at config load** (Class B per ADR-0002, divergence row #7):
-  ```
-  warn!(
-      proxy = %name,
-      "flow: xtls-rprx-vision applies to TCP only; UDP relays on \
-       this proxy will use plain VLESS (Vision's inner-TLS splice \
-       is not defined for UDP datagrams)"
-  );
-  ```
-  The user gets one loud signal at startup and can accept it or set
-  `udp: false`. No runtime log noise on subsequent UDP dials.
+- `flow: xtls-rprx-vision` + `udp: true` uses XUDP inside the Vision stream.
+  The VLESS request carries CommandMux and the flow addon. The first XUDP
+  datagram is New+Data; subsequent datagrams are Keep+Data, each with its
+  own destination. TCP connection multiplexing remains independently configured.
 
 ## Internal design sketch
 
@@ -389,7 +380,7 @@ impl ProxyAdapter for VlessAdapter {
     }
 
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
-        // ... identical shape to dial_tcp, Cmd::Udp, no Vision on UDP
+        // ... CommandMux + XudpConn, wrapped in VisionConn when flow is set
     }
 
     fn health(&self) -> &ProxyHealth { &self.health }
@@ -628,9 +619,8 @@ Same skip-if-absent pattern as `vmess_integration.rs`. Binary name:
    Vision" is not a useful unit to ship for real users (Vision is why
    people choose VLESS over VMess). Bundled.
 
-3. **UDP + Vision → silent pass-through, warn-once at load.**
-   `VlessAdapter::dial_udp` silently ignores `flow: xtls-rprx-vision`
-   and uses plain `VlessConn`. Warn-once at config load (Class B per
-   ADR-0002 — see divergence row #7). UDP relay still routes correctly
-   with outer-TLS guarantees; Vision's inner-TLS splice is TCP-only by
-   definition.
+3. **UDP defaults to XUDP, including the configured Vision flow.**
+   This follows mihomo `adapter/outbound/vless.go::NewVless` and
+   sing-vmess `xudp.go`. Legacy VLESS UDP framing is available to library
+   callers through `with_xudp(false)`. Reader progress and pending writes
+   survive cancellation; a small receive buffer truncates only one datagram.

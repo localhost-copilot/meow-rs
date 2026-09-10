@@ -57,6 +57,7 @@ pub struct VlessAdapter {
     uuid_bytes: [u8; 16],
     flow: Option<VlessFlow>,
     udp: bool,
+    xudp: bool,
     transport: Arc<TransportChain>,
     dialer: Arc<dyn crate::dialer::TcpDialer>,
     /// sing-mux compatible connection multiplexing (optional).
@@ -97,6 +98,7 @@ impl VlessAdapter {
             uuid_bytes,
             flow,
             udp,
+            xudp: true,
             transport: Arc::new(transport),
             dialer,
             #[cfg(feature = "mux")]
@@ -105,6 +107,12 @@ impl VlessAdapter {
             encryption: None,
             health: ProxyHealth::new(),
         }
+    }
+
+    /// Select XUDP (default) or legacy, single-destination VLESS UDP framing.
+    pub fn with_xudp(mut self, enabled: bool) -> Self {
+        self.xudp = enabled;
+        self
     }
 
     /// Enable connection multiplexing.  Two wire protocols share one
@@ -346,7 +354,6 @@ impl ProxyAdapter for VlessAdapter {
             }
         }
 
-        // Vision is TCP-only; UDP always uses plain VlessConn regardless of flow.
         debug!(
             "VLESS UDP connecting to {} via {}",
             metadata.remote_address(),
@@ -354,6 +361,37 @@ impl ProxyAdapter for VlessAdapter {
         );
 
         let stream = self.dial_stream().await?;
+        if self.xudp {
+            let conn: Box<dyn ProxyConn> = match self.flow {
+                #[cfg(feature = "vless-vision")]
+                Some(VlessFlow::XtlsRprxVision) => {
+                    let vless = VlessConn::new_mux_deferred(
+                        stream,
+                        &self.uuid_bytes,
+                        Some("xtls-rprx-vision"),
+                    )
+                    .await?;
+                    Box::new(VisionConn::new(vless, self.uuid_bytes))
+                }
+                #[cfg(not(feature = "vless-vision"))]
+                Some(VlessFlow::XtlsRprxVision) => {
+                    return Err(MeowError::Config(
+                        "vless: xtls-rprx-vision requires the `vless-vision` Cargo feature".into(),
+                    ))
+                }
+                None => Box::new(VlessConn::new_mux(stream, &self.uuid_bytes, None).await?),
+            };
+            let destination = std::net::SocketAddr::new(
+                metadata
+                    .dst_ip
+                    .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                metadata.dst_port,
+            );
+            return Ok(Box::new(crate::vless::xudp::XudpConn::new(
+                conn,
+                destination,
+            )));
+        }
         let addr = addr_from_metadata(metadata);
 
         let conn = VlessPacketConn::new(stream, &self.uuid_bytes, metadata.dst_port, &addr).await?;
@@ -479,17 +517,5 @@ mod tests {
         // and the dial_tcp match arm for it compiles, the test passes.
         // (Runtime round-trip is in the integration test H4.)
         let _a = make_adapter(Some(VlessFlow::XtlsRprxVision), false);
-    }
-
-    // ─── E6: dial_udp ignores Vision flow (guard-rail) ───────────────────────
-
-    // This is tested at runtime in the integration tests.
-    // The compile-time check: dial_udp should always compile regardless of flow.
-    #[test]
-    fn vless_udp_ignores_vision_flow_compiles() {
-        // Just verify the adapter compiles with XtlsRprxVision + udp: true.
-        #[cfg(feature = "vless-vision")]
-        let _ = make_adapter(Some(VlessFlow::XtlsRprxVision), true);
-        let _ = make_adapter(None, true);
     }
 }

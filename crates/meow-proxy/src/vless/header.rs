@@ -87,7 +87,6 @@ pub(crate) enum Cmd {
     Udp = 0x02,
     /// `0x03` — Mux.Cool session (Xray `CommandMux`): the request carries
     /// no port/address; per-stream targets ride mux frames on the stream.
-    #[cfg(feature = "mux")]
     Mux = 0x03,
 }
 
@@ -165,7 +164,6 @@ fn put_flow_addon(dst: &mut BytesMut, flow: Option<&str>) {
 /// are omitted (the `if command != ...Mux` guard); sing-vmess
 /// vless/protocol.go::ReadRequest mirrors it by skipping the address parse
 /// for `CommandMux`.
-#[cfg(feature = "mux")]
 pub(crate) fn encode_mux_request(dst: &mut BytesMut, uuid_bytes: &[u8; 16], flow: Option<&str>) {
     dst.put_u8(0x00); // version
     dst.put_slice(uuid_bytes);

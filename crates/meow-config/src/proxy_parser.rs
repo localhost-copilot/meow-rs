@@ -1406,16 +1406,6 @@ fn parse_vless(
     // ── mux: sing-mux compatible connection multiplexing ─────────────────
     // Parsed after adapter construction below — see the `with_mux` call.
 
-    // ── Warn: Vision + UDP (Class B) ─────────────────────────────────────
-    if flow == Some(VlessFlow::XtlsRprxVision) && udp {
-        tracing::warn!(
-            proxy = %name,
-            "flow: xtls-rprx-vision applies to TCP only; UDP relays on \
-             this proxy will use plain VLESS (Vision's inner-TLS splice \
-             is not defined for UDP datagrams). (Class B divergence)"
-        );
-    }
-
     // ── Build transport chain ──────────────────────────────────────────────
     let mut chain = TransportChain::empty();
 
