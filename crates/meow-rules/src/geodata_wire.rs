@@ -22,27 +22,6 @@ pub(crate) struct PbReader<'a> {
     pub(crate) pos: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn varint_bounds_reject_overflow_and_truncation() {
-        let mut maximal = [0xff; 10];
-        maximal[9] = 1;
-        assert_eq!(PbReader::new(&maximal).read_varint().unwrap(), u64::MAX);
-        maximal[9] = 2;
-        assert!(matches!(
-            PbReader::new(&maximal).read_varint(),
-            Err(WireError::VarintOverflow(_))
-        ));
-        assert!(matches!(
-            PbReader::new(&[0x80]).read_varint(),
-            Err(WireError::Truncated(_))
-        ));
-    }
-}
-
 impl<'a> PbReader<'a> {
     pub(crate) fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
@@ -122,5 +101,26 @@ impl<'a> PbReader<'a> {
             other => return Err(WireError::UnknownWireType(start, other)),
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn varint_bounds_reject_overflow_and_truncation() {
+        let mut maximal = [0xff; 10];
+        maximal[9] = 1;
+        assert_eq!(PbReader::new(&maximal).read_varint().unwrap(), u64::MAX);
+        maximal[9] = 2;
+        assert!(matches!(
+            PbReader::new(&maximal).read_varint(),
+            Err(WireError::VarintOverflow(_))
+        ));
+        assert!(matches!(
+            PbReader::new(&[0x80]).read_varint(),
+            Err(WireError::Truncated(_))
+        ));
     }
 }
