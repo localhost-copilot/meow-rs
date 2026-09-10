@@ -15,7 +15,7 @@
 //! | S5  | `enable: true` + `sniff.HTTP.ports: [80]` → loaded, http_ports=[80]    |
 //! | S6  | `enable: true` + both TLS and HTTP populated → both lists set          |
 //! | S7  | Protocol keys are case-insensitive (`tls:`, `Tls:`, `TLS:` all work)   |
-//! | S8  | `sniff.QUIC` is parsed but ignored (warn-only)                         |
+//! | S8  | QUIC ports and destination override are supported                    |
 //! | S9  | Unknown protocol key is parsed but ignored (warn-only)                 |
 //! | S10 | `enable: false` + empty `sniff:` → loads (no port-presence check)      |
 //! | S11 | `timeout: 0` → hard error (out of range)                               |
@@ -73,8 +73,6 @@ async fn s3_enable_true_with_only_unknown_protocols_errors() {
 sniffer:
   enable: true
   sniff:
-    QUIC:
-      ports: [443]
     SOMETHING:
       ports: [9999]
 "#;
@@ -155,22 +153,22 @@ sniffer:
     assert_eq!(cfg.sniffer.http_ports, vec![80]);
 }
 
-// ─── S8: QUIC is ignored (warn-only) ─────────────────────────────────────
+// ─── S8: QUIC-only configurations are supported ─────────────────────────
 
 #[tokio::test]
-async fn s8_quic_protocol_ignored_with_other_proto_present() {
+async fn s8_quic_only_configuration() {
     let yaml = r#"
 sniffer:
   enable: true
   sniff:
-    TLS:
-      ports: [443]
     QUIC:
-      ports: [443]
+      ports: [443, 8443]
+      override-destination: false
 "#;
     let cfg = load_config_from_str(yaml).await.expect("must load");
-    // QUIC entry is silently dropped — we don't synthesise a quic_ports field.
-    assert_eq!(cfg.sniffer.tls_ports, vec![443]);
+    assert_eq!(cfg.sniffer.quic_ports, vec![443, 8443]);
+    assert_eq!(cfg.sniffer.quic_override_destination, Some(false));
+    assert!(cfg.sniffer.tls_ports.is_empty());
     assert_eq!(cfg.sniffer.http_ports, Vec::<u16>::new());
 }
 
