@@ -28,6 +28,16 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod forward;
+use forward::ForwardCache;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CacheAlgorithm {
+    #[default]
+    Lru,
+    Arc,
+}
+
 /// IP list returned by cache hits. Domains overwhelmingly resolve to 1–2
 /// addresses, which fit inline — making cache hits allocation-free in the
 /// common case.
@@ -271,7 +281,7 @@ const SHARDS: usize = 16;
 const SHARD_MASK: usize = SHARDS - 1;
 
 pub struct DnsCache {
-    cache: [Mutex<LruCache<Arc<str>, CacheEntry>>; SHARDS],
+    cache: [Mutex<ForwardCache>; SHARDS],
     /// Reverse mapping: IP → domain (for DNS snooping / tproxy hostname recovery).
     /// Bounded per-shard LRU — entries past capacity are evicted in
     /// least-recently-used order.
@@ -283,7 +293,6 @@ pub struct DnsCache {
     /// 4096-entry forward cap), charging every process for tables that only
     /// fill under sustained DNS load. Lazy tables grow to the same bucket
     /// count only once the entries actually exist.
-    fwd_shard_cap: usize,
     rev_shard_cap: usize,
 }
 
@@ -375,10 +384,18 @@ fn family_hit(
 
 impl DnsCache {
     pub fn new(capacity: usize) -> Self {
+        Self::with_algorithm(capacity, CacheAlgorithm::Lru)
+    }
+
+    pub fn with_algorithm(capacity: usize, algorithm: CacheAlgorithm) -> Self {
         Self {
-            cache: std::array::from_fn(|_| Mutex::new(LruCache::unbounded())),
+            cache: std::array::from_fn(|_| {
+                Mutex::new(ForwardCache::new(
+                    per_shard_cap(capacity.max(SHARDS), 8),
+                    algorithm == CacheAlgorithm::Arc,
+                ))
+            }),
             reverse: std::array::from_fn(|_| Mutex::new(LruCache::unbounded())),
-            fwd_shard_cap: per_shard_cap(capacity.max(SHARDS), 8),
             rev_shard_cap: per_shard_cap(
                 capacity.saturating_mul(REVERSE_CAP_MULTIPLIER).max(SHARDS),
                 16,
@@ -529,9 +546,6 @@ impl DnsCache {
         };
         let mut cache = self.cache[shard_str(&domain)].lock();
         cache.put(key, entry);
-        if cache.len() > self.fwd_shard_cap {
-            cache.pop_lru();
-        }
     }
 
     /// Merge a single family's answer into an existing entry without disturbing
@@ -709,9 +723,6 @@ impl DnsCache {
                 neg: merged_neg,
             },
         );
-        if cache.len() > self.fwd_shard_cap {
-            cache.pop_lru();
-        }
     }
 
     /// Reverse lookup: given an IP, return the domain that resolved to it.
