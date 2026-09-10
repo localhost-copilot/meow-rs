@@ -5,6 +5,29 @@ Owner: pm
 Tracks roadmap item: **M1.F-2**
 Related gap-analysis row: `sniffer` (top-level config block, §5).
 
+## Implemented compatibility update (2026-09)
+
+The runtime now follows mihomo's dispatcher semantics below. These supersede
+the original prototype's defaults and gate descriptions later in this document:
+
+- `override-destination` defaults to true. Each `sniff.HTTP` / `sniff.TLS`
+  entry can override it independently. Replacing the destination updates
+  `host` and clears `dst_ip`, so the outbound resolves the new hostname.
+- Overlapping HTTP and TLS port lists try both parsers and use the successful
+  protocol's settings. HTTP's `8080-8880` range therefore does not disable TLS
+  sniffing on 8443.
+- `parse-pure-ip` enables sniffing for destinations without a domain;
+  disabling it does not force known domains to be sniffed. `force-domain`
+  remains an independent override.
+- `force-dns-mapping` defaults to true and enables sniffing for a known DNS
+  mapping. Listeners perform reverse mapping before sniffing. Fake-IP reverse
+  mappings preserve their original hostname unless `force-domain` matches.
+- Successful sniffing sets `sniff_host` for rules and returns `dns_mode` to
+  normal even when destination replacement is disabled.
+
+Regression coverage lives in `meow-listener::sniffer::tests`, including
+overlapping ports with different override policies and the DNS mapping gate.
+
 ## Motivation
 
 Clash Meta supports a `sniffer:` block that extracts the destination host

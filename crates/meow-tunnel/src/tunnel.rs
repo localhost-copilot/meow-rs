@@ -120,6 +120,7 @@ impl TunnelInner {
             if metadata.host.is_empty() {
                 if let Some(host) = self.resolver.reverse_lookup(ip) {
                     metadata.host = host;
+                    metadata.dns_mode = meow_common::DnsMode::Mapping;
                 }
             }
             return;
@@ -128,6 +129,7 @@ impl TunnelInner {
             debug!("pre_handle_metadata: fake-ip {} → {}", ip, host);
             metadata.host = host;
             metadata.dst_ip = None;
+            metadata.dns_mode = meow_common::DnsMode::FakeIp;
         } else {
             // Fake IP without a reverse mapping — pool wrap evicted the
             // entry since synthesis. Leave the IP in place; the connection

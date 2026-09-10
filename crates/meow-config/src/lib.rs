@@ -1294,14 +1294,6 @@ fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::E
                     `sniffer:` wins; `tproxy_sni` is ignored."
                 );
             }
-            // Warn-and-ignore force-dns-mapping.
-            if rs.force_dns_mapping.unwrap_or(false) {
-                warn!(
-                    "sniffer.force-dns-mapping is accepted and ignored: meow-rs \
-                    always maps fake-ip / snooped destinations back to their \
-                    domain via the DNS reverse table, so the flag has no effect"
-                );
-            }
             let enable = rs.enable.unwrap_or(false);
             let timeout_ms = rs.timeout.unwrap_or(100);
             if !(1..=60000).contains(&timeout_ms) {
@@ -1311,14 +1303,18 @@ fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::E
             // Parse per-protocol port lists.
             let mut tls_ports: Vec<u16> = Vec::new();
             let mut http_ports: Vec<u16> = Vec::new();
+            let mut tls_override_destination = None;
+            let mut http_override_destination = None;
             if let Some(sniff_map) = rs.sniff.as_ref() {
                 for (key, proto) in sniff_map {
                     match key.to_uppercase().as_str() {
                         "TLS" => {
                             tls_ports = proto.ports.clone().unwrap_or_default();
+                            tls_override_destination = proto.override_destination;
                         }
                         "HTTP" => {
                             http_ports = proto.ports.clone().unwrap_or_default();
+                            http_override_destination = proto.override_destination;
                         }
                         "QUIC" => {
                             warn!("sniffer.sniff.QUIC is not implemented in meow-rs; ignoring");
@@ -1342,7 +1338,10 @@ fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::E
                 enable,
                 timeout: std::time::Duration::from_millis(timeout_ms),
                 parse_pure_ip: rs.parse_pure_ip.unwrap_or(true),
-                override_destination: rs.override_destination.unwrap_or(false),
+                override_destination: rs.override_destination.unwrap_or(true),
+                tls_override_destination,
+                http_override_destination,
+                force_dns_mapping: rs.force_dns_mapping.unwrap_or(true),
                 tls_ports,
                 http_ports,
                 skip_domain: rs
@@ -1374,6 +1373,7 @@ fn parse_sniffer_config(raw: &raw::RawConfig) -> Result<SnifferConfig, anyhow::E
                 http_ports: Vec::new(),
                 skip_domain: Vec::new(),
                 force_domain: Vec::new(),
+                ..Default::default()
             })
         }
         None => Ok(SnifferConfig::default()),

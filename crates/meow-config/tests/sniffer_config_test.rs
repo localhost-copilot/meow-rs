@@ -24,7 +24,7 @@
 //! | S14 | `skip-domain` and `force-domain` lists pass through verbatim           |
 //! | S15 | deprecated `tproxy_sni: true` alone → enable=true, tls=[443]           |
 //! | S16 | `sniffer:` + `tproxy_sni: true` → sniffer wins; tproxy_sni ignored     |
-//! | S17 | `force-dns-mapping: true` → warns and accepted; rest of config loads   |
+//! | S17 | `force-dns-mapping: true` → DNS mapping gate is enabled               |
 //! | S18 | `parse-pure-ip` / `override-destination` overrides apply               |
 
 use meow_config::load_config_from_str;
@@ -48,7 +48,6 @@ async fn s1_no_sniffer_block_yields_default_disabled() {
     assert!(!cfg.sniffer.enable, "default sniffer must be disabled");
     // When disabled, port lists carry the `SnifferConfig::default()` values
     // and are inert at runtime — we only assert the disable flag.
-    assert!(!cfg.sniffer.override_destination);
 }
 
 // ─── S2: enable: true with no `sniff:` map at all ────────────────────────
@@ -320,7 +319,7 @@ sniffer:
 // ─── S17: force-dns-mapping accepted (warn-only) ─────────────────────────
 
 #[tokio::test]
-async fn s17_force_dns_mapping_accepted_with_warn() {
+async fn s17_force_dns_mapping_enabled() {
     let yaml = r#"
 sniffer:
   enable: true
@@ -332,8 +331,7 @@ sniffer:
     let cfg = load_config_from_str(yaml).await.expect("must load");
     assert!(cfg.sniffer.enable);
     assert_eq!(cfg.sniffer.tls_ports, vec![443]);
-    // No assertion on the warn line — `tracing` capture would couple us to
-    // the global subscriber. The intent is "no hard error".
+    assert!(cfg.sniffer.force_dns_mapping);
 }
 
 // ─── S18: parse-pure-ip and override-destination overrides ───────────────
