@@ -1949,8 +1949,7 @@ async fn build_config(
     // raw `*`, which is not an IP literal (#388). Dual-stack wildcard stays
     // spellable as `'::'`.
     let bind_address = match raw.bind_address.as_deref() {
-        None => "127.0.0.1".to_string(),
-        Some("*" | "") => "0.0.0.0".to_string(),
+        None | Some("*" | "") => "0.0.0.0".to_string(),
         Some(addr) => addr.to_string(),
     };
 
@@ -3225,11 +3224,14 @@ mod bind_address_tests {
     }
 
     #[tokio::test]
-    async fn default_bind_address_is_loopback() {
-        let config = load_config_from_str("mixed-port: 7890\n")
-            .await
-            .expect("minimal config must load");
-        assert_eq!(config.general.bind_address, "127.0.0.1");
+    async fn allow_lan_controls_default_listener_binding() {
+        for (allow_lan, expected) in [(false, "127.0.0.1"), (true, "0.0.0.0")] {
+            let config =
+                load_config_from_str(&format!("mixed-port: 7890\nallow-lan: {allow_lan}\n"))
+                    .await
+                    .expect("minimal config must load");
+            assert_eq!(config.listeners.bind_address, expected);
+        }
     }
 }
 
