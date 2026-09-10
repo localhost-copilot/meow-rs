@@ -785,8 +785,8 @@ fn rebuild_from_raw_impl(
     if let Some(mark) = raw.routing_mark {
         direct = direct.with_routing_mark(mark);
     }
-    if let Some(resolver) = resolver {
-        direct = direct.with_resolver(resolver);
+    if let Some(resolver) = &resolver {
+        direct = direct.with_resolver(Arc::clone(resolver));
     }
     if let Some(secs) = raw.tcp_connect_timeout {
         direct = direct.with_connect_timeout(std::time::Duration::from_secs(secs));
@@ -794,6 +794,14 @@ fn rebuild_from_raw_impl(
     proxies.insert(
         SmolStr::new_static("DIRECT"),
         Arc::new(proxy_parser::WrappedProxy::new(Box::new(direct))),
+    );
+    let mut compatible = meow_proxy::DirectAdapter::new().into_compatible();
+    if let Some(resolver) = resolver {
+        compatible = compatible.with_resolver(resolver);
+    }
+    proxies.insert(
+        SmolStr::new_static("COMPATIBLE"),
+        Arc::new(proxy_parser::WrappedProxy::new(Box::new(compatible))),
     );
     proxies.insert(
         SmolStr::new_static("REJECT"),

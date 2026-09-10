@@ -139,7 +139,10 @@ pub(super) fn record_dial_failure(
 ) {
     if matches!(
         member.adapter_type(),
-        AdapterType::Direct | AdapterType::Reject | AdapterType::RejectDrop
+        AdapterType::Direct
+            | AdapterType::Compatible
+            | AdapterType::Reject
+            | AdapterType::RejectDrop
     ) {
         return;
     }
@@ -215,6 +218,56 @@ pub(crate) mod test_support;
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn empty_fallback_tracks_provider_removal_and_recovery() {
+        use super::test_support::MockProxy;
+        use super::{fallback::FallbackGroup, selector::SelectorGroup, urltest::UrlTestGroup};
+        use meow_common::{Metadata, ProviderSlot, Proxy};
+        use std::sync::Arc;
+        for kind in ["select", "fallback", "url-test"] {
+            let slot: ProviderSlot = Arc::new(parking_lot::RwLock::new(Vec::new()));
+            let fallback = MockProxy::new("REJECT");
+            let node = MockProxy::new("node");
+            let fallback_proxy: Arc<dyn Proxy> = Arc::clone(&fallback) as _;
+            let group: Arc<dyn Proxy> = match kind {
+                "select" => Arc::new(
+                    SelectorGroup::new_with_providers("group", vec![], vec![Arc::clone(&slot)])
+                        .with_empty_fallback(fallback_proxy),
+                ),
+                "fallback" => Arc::new(
+                    FallbackGroup::new_with_providers("group", vec![], vec![Arc::clone(&slot)])
+                        .with_empty_fallback(fallback_proxy),
+                ),
+                _ => Arc::new(
+                    UrlTestGroup::new_with_providers("group", vec![], 50, vec![Arc::clone(&slot)])
+                        .with_empty_fallback(fallback_proxy),
+                ),
+            };
+            let metadata = Metadata::default();
+            for empty in [true, false, true, false] {
+                *slot.write() = if empty {
+                    vec![]
+                } else {
+                    vec![Arc::clone(&node) as _]
+                };
+                let expected = if empty { "REJECT" } else { "node" };
+                assert_eq!(group.members().unwrap(), vec![expected]);
+                assert_eq!(group.unwrap_proxy(&metadata).unwrap().name(), expected);
+                assert!(group.dial_tcp(&metadata).await.is_err());
+            }
+            assert_eq!(
+                fallback
+                    .dial_count
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                2
+            );
+            assert_eq!(
+                node.dial_count.load(std::sync::atomic::Ordering::Relaxed),
+                2
+            );
+        }
+    }
+
     use super::*;
 
     fn io_err(msg: &str) -> MeowError {
