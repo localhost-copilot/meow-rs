@@ -39,6 +39,10 @@ boring = { path = "vendor/boring" }
 [profile.release.package.meow-smoltcp]
 opt-level = 3
 
+# The independent test peer uses the registry's older smoltcp version.
+[profile.release.package.smoltcp]
+opt-level = 3
+
 [profile.release.package.meow-netstack]
 opt-level = 3
 

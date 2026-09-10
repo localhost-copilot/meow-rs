@@ -337,20 +337,18 @@ pub enum HardwareAddress {
     feature = "medium-ieee802154"
 ))]
 #[cfg(test)]
+// The preferred medium depends on features; non-IP variants carry an address.
+#[allow(clippy::derivable_impls)]
 impl Default for HardwareAddress {
     fn default() -> Self {
-        #![allow(unreachable_code)]
-        #[cfg(feature = "medium-ethernet")]
-        {
-            return Self::Ethernet(EthernetAddress::default());
-        }
-        #[cfg(feature = "medium-ip")]
-        {
-            return Self::Ip;
-        }
-        #[cfg(feature = "medium-ieee802154")]
-        {
-            Self::Ieee802154(Ieee802154Address::default())
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "medium-ethernet")] {
+                Self::Ethernet(EthernetAddress::default())
+            } else if #[cfg(feature = "medium-ip")] {
+                Self::Ip
+            } else {
+                Self::Ieee802154(Ieee802154Address::default())
+            }
         }
     }
 }
