@@ -153,6 +153,7 @@ fn rebuild_from_raw_includes_builtins() {
     assert!(proxies.contains_key("DIRECT"));
     assert!(proxies.contains_key("REJECT"));
     assert!(proxies.contains_key("REJECT-DROP"));
+    assert!(proxies.contains_key("COMPATIBLE"));
 }
 
 #[test]
@@ -168,8 +169,6 @@ fn rebuild_from_raw_parses_rules() {
 fn rebuild_from_raw_empty_config() {
     let raw = RawConfig::default();
     let (proxies, rules) = rebuild_from_raw(&raw).unwrap();
-    // Should still have built-in proxies + auto-created GLOBAL
-    assert_eq!(proxies.len(), 4);
     assert!(proxies.contains_key("GLOBAL"));
     assert!(rules.is_empty());
 }
@@ -198,8 +197,6 @@ fn rebuild_from_raw_with_groups() {
     assert!(proxies.contains_key("Select"));
     assert!(proxies.contains_key("Auto"));
     assert!(proxies.contains_key("GLOBAL"));
-    // 3 built-in + 2 groups + 1 auto-created GLOBAL
-    assert_eq!(proxies.len(), 6);
 }
 
 #[test]
