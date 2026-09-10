@@ -51,6 +51,13 @@ pub async fn parse_dns(
     };
 
     let use_hosts = dns.use_hosts.unwrap_or(true);
+    let cache_algorithm = match dns.cache_algorithm.as_deref() {
+        None | Some("lru" | "") => meow_dns::cache::CacheAlgorithm::Lru,
+        Some("arc") => meow_dns::cache::CacheAlgorithm::Arc,
+        Some(other) => {
+            anyhow::bail!("unsupported dns.cache-algorithm '{other}'; expected lru or arc")
+        }
+    };
     let use_system_hosts = dns.use_system_hosts.unwrap_or(true);
 
     let main_urls = parse_nameserver_entries(dns.nameserver.as_deref().unwrap_or(&[]))?;
@@ -164,6 +171,8 @@ pub async fn parse_dns(
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    resolver.set_cache_algorithm(cache_algorithm);
 
     // Fake-IP wiring: only when enhanced-mode == fake-ip. Errors here are
     // fatal (Class A per ADR-0002) — a misconfigured fake-IP range would
