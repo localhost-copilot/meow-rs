@@ -195,6 +195,7 @@ async fn handle_http_inner(
             .await?;
 
         // Sniff TLS SNI from the client's TLS ClientHello (if applicable).
+        tunnel.inner().pre_handle_metadata(&mut metadata);
         if let Some(rt) = sniffer {
             rt.sniff(stream, &mut metadata).await;
         }

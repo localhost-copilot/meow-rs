@@ -16,6 +16,9 @@ pub struct SnifferConfig {
     pub timeout: Duration,
     pub parse_pure_ip: bool,
     pub override_destination: bool,
+    pub tls_override_destination: Option<bool>,
+    pub http_override_destination: Option<bool>,
+    pub force_dns_mapping: bool,
     /// Destination ports on which to try TLS SNI extraction.
     pub tls_ports: Vec<u16>,
     /// Destination ports on which to try HTTP Host extraction.
@@ -32,7 +35,10 @@ impl Default for SnifferConfig {
             enable: false,
             timeout: Duration::from_millis(100),
             parse_pure_ip: true,
-            override_destination: false,
+            override_destination: true,
+            tls_override_destination: None,
+            http_override_destination: None,
+            force_dns_mapping: true,
             tls_ports: vec![443, 8443],
             http_ports: vec![80, 8080, 8880],
             skip_domain: Vec::new(),
