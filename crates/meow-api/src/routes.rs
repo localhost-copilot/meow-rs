@@ -1813,6 +1813,9 @@ async fn swap_config_and_reconcile_tun(state: &AppState, candidate: RawConfig) {
     state
         .tunnel
         .set_find_process_mode(candidate.find_process_mode.unwrap_or_default());
+    if let Ok(config) = meow_config::parse_sniffer_config(&candidate) {
+        state.tunnel.set_sniffer(config);
+    }
 
     let new_enable = candidate.tun.as_ref().is_some_and(|t| t.enable);
     // Snapshot the candidate (only on an off→on transition, before it is

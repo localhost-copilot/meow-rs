@@ -18,11 +18,13 @@ pub struct SnifferConfig {
     pub override_destination: bool,
     pub tls_override_destination: Option<bool>,
     pub http_override_destination: Option<bool>,
+    pub quic_override_destination: Option<bool>,
     pub force_dns_mapping: bool,
     /// Destination ports on which to try TLS SNI extraction.
     pub tls_ports: Vec<u16>,
     /// Destination ports on which to try HTTP Host extraction.
     pub http_ports: Vec<u16>,
+    pub quic_ports: Vec<u16>,
     /// Glob-style domain patterns; sniffed results matching these are discarded.
     pub skip_domain: Vec<SmolStr>,
     /// Glob-style domain patterns; hosts matching these bypass `parse_pure_ip`.
@@ -38,9 +40,11 @@ impl Default for SnifferConfig {
             override_destination: true,
             tls_override_destination: None,
             http_override_destination: None,
+            quic_override_destination: None,
             force_dns_mapping: true,
             tls_ports: vec![443, 8443],
             http_ports: vec![80, 8080, 8880],
+            quic_ports: vec![443, 8443],
             skip_domain: Vec::new(),
             force_domain: Vec::new(),
         }

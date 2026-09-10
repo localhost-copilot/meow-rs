@@ -180,13 +180,14 @@ async fn relay_flow(
 
     let inner = tunnel.inner();
     inner.pre_handle_metadata(&mut metadata);
-    // UDP keeps the eager pre_resolve (no lazy enrichment): the outbound
-    // packet API below needs a resolved dst_ip regardless of what the rules
-    // demand — including after a fake-IP was rewritten back to a hostname.
-    inner.pre_resolve(&mut metadata).await;
-    if metadata.dst_ip.is_none() && !metadata.host.is_empty() {
-        metadata.dst_ip = inner.resolver.resolve_ip_real(&metadata.host).await;
+    let opening = inner.sniff_udp_initial(&mut metadata, &mut rx).await;
+    if opening.is_empty() {
+        return Ok(());
     }
+    let resolved_route = inner
+        .resolve_udp_host(&mut metadata)
+        .await
+        .map_err(|e| e.to_string())?;
     let Some(dst_ip) = metadata.dst_ip else {
         return Err(format!(
             "dst_ip not resolved for {}",
@@ -196,7 +197,9 @@ async fn relay_flow(
     let dst_addr = SocketAddr::new(dst_ip, metadata.dst_port);
 
     // Non-hijacked client traffic follows the same policy on every port.
-    let Some((proxy, rule_name, rule_payload)) = inner.resolve_proxy(&metadata) else {
+    let Some((proxy, rule_name, rule_payload)) =
+        resolved_route.or_else(|| inner.resolve_proxy(&metadata))
+    else {
         return Err(format!(
             "no matching rule for {}",
             metadata.remote_address()
@@ -214,6 +217,11 @@ async fn relay_flow(
     let conn = with_dial_timeout(proxy.name(), proxy.dial_udp(&metadata))
         .await
         .map_err(|e| format!("dial_udp via {}: {e}", proxy.name()))?;
+    for packet in opening {
+        conn.write_packet(&packet, &dst_addr)
+            .await
+            .map_err(|e| format!("upstream initial write: {e}"))?;
+    }
 
     // Single-task pump: select over upstream datagrams (queued by the
     // reader loop), downstream packets, and the idle deadline. Reply
@@ -281,7 +289,8 @@ mod tests {
     async fn udp_port_53_obeys_reject_rule_without_hijack() {
         let tunnel = crate::test_rule_tunnel();
         for port in [53, 5353] {
-            let (_tx, rx) = tokio::sync::mpsc::channel(1);
+            let (tx, rx) = tokio::sync::mpsc::channel(1);
+            tx.try_send(b"query".to_vec()).unwrap();
             let (reply_tx, _reply_rx) = tokio::sync::mpsc::channel(1);
             let result = super::relay_flow(
                 &tunnel,
