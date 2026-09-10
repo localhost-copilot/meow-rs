@@ -439,6 +439,62 @@ pub async fn load_config_from_str(content: &str) -> Result<Config, anyhow::Error
     build_config(raw, None).await
 }
 
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn selection_persistence_can_be_disabled_at_startup_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selector-cache.json");
+        std::fs::write(&path, r#"{"pick":"REJECT"}"#).unwrap();
+        for enabled in [true, false] {
+            let raw = parse_raw_yaml(&format!("profile:\n  store-selected: {enabled}\nproxy-groups:\n  - name: pick\n    type: select\n    proxies: [DIRECT, REJECT]\n")).unwrap();
+            let config = build_config(raw.clone(), Some(dir.path())).await.unwrap();
+            let (rebuilt, _) =
+                rebuild_from_raw_runtime(&raw, None, &HashMap::new(), Some(dir.path())).unwrap();
+            for proxies in [&config.proxies, &rebuilt] {
+                let group = &proxies["pick"];
+                assert_eq!(
+                    group.current().as_deref(),
+                    Some(if enabled { "REJECT" } else { "DIRECT" })
+                );
+                group.selection().unwrap().set("DIRECT").await.unwrap();
+                let stored: HashMap<String, String> =
+                    serde_yaml::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                assert_eq!(stored["pick"], if enabled { "DIRECT" } else { "REJECT" });
+                std::fs::write(&path, r#"{"pick":"REJECT"}"#).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_controls_fake_ip_persistence_across_restarts() {
+        for enabled in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let raw = parse_raw_yaml(&format!("profile:\n  store-fake-ip: {enabled}\ndns:\n  enable: true\n  enhanced-mode: fake-ip\n  store-fake-ip: {}\n  nameserver: [1.1.1.1]\n", !enabled)).unwrap();
+            let config = build_config(raw.clone(), Some(dir.path())).await.unwrap();
+            let ip = config
+                .dns
+                .resolver
+                .lookup_ipv4("persist.example")
+                .await
+                .unwrap();
+            drop(config);
+            assert_eq!(dir.path().join("fakeip-v4.json").exists(), enabled);
+            let config = build_config(raw, Some(dir.path())).await.unwrap();
+            assert_eq!(
+                config.dns.resolver.reverse_lookup(ip).as_deref(),
+                if enabled {
+                    Some("persist.example")
+                } else {
+                    None
+                }
+            );
+        }
+    }
+}
+
 /// Parse a Clash/mihomo YAML document into [`raw::RawConfig`], expanding YAML
 /// anchor merge keys (`<<: *anchor`) before deserialisation.
 ///
@@ -511,7 +567,8 @@ pub fn rebuild_from_raw_with_resolver(
 }
 
 /// Runtime rebuild variant that keeps live proxy-provider slots and the
-/// process-wide selection store wired into rebuilt groups.
+/// selection store wired into rebuilt groups when `profile.store-selected`
+/// is enabled.
 ///
 /// See [`rebuild_from_raw_with_resolver`] for why `cache_dir` must be the
 /// startup provider-cache directory rather than `None`.
@@ -521,7 +578,11 @@ pub fn rebuild_from_raw_runtime(
     providers: &HashMap<String, Arc<ProxyProvider>>,
     cache_dir: Option<&Path>,
 ) -> Result<RebuildResult, anyhow::Error> {
-    let store = meow_proxy::SelectorStore::global();
+    let store = if raw.store_selected() {
+        cache_dir.map(|dir| meow_proxy::SelectorStore::open(dir.join("selector-cache.json")))
+    } else {
+        None
+    };
     rebuild_from_raw_impl(
         raw,
         cache_dir,
@@ -1996,8 +2057,10 @@ async fn build_config(
     // Missing/unreadable files yield an empty store — no fatal errors.
     let cache_dir_buf = cache_dir.map(Path::to_path_buf);
     let selector_store = match cache_dir_buf.as_ref() {
-        Some(d) => Some(open_selector_store_async(d.join("selector-cache.json")).await?),
-        None => None,
+        Some(d) if raw.store_selected() => {
+            Some(open_selector_store_async(d.join("selector-cache.json")).await?)
+        }
+        _ => None,
     };
 
     // Fetch/read rule-provider payloads once; the geodata check, the parser

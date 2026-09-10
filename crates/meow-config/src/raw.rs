@@ -125,6 +125,7 @@ pub struct RawGeoDataUrls {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct RawConfig {
+    pub profile: Option<RawProfile>,
     pub port: Option<u16>,
     pub socks_port: Option<u16>,
     pub mixed_port: Option<u16>,
@@ -186,6 +187,22 @@ pub struct RawConfig {
     /// listener. The default is 256; explicit `0` disables the cap. Individual `listeners:`
     /// entries can override this with their own `max-connections` field.
     pub max_connections: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct RawProfile {
+    pub store_selected: Option<bool>,
+    pub store_fake_ip: Option<bool>,
+}
+
+impl RawConfig {
+    pub(crate) fn store_selected(&self) -> bool {
+        self.profile
+            .as_ref()
+            .and_then(|p| p.store_selected)
+            .unwrap_or(true)
+    }
 }
 
 /// A `hosts:` map value: one IP/domain alias or a list of IP addresses.
