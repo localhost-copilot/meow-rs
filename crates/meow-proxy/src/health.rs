@@ -3,10 +3,12 @@ use meow_common::{Proxy, ProxyAdapter};
 use meow_transport::tls::{TlsConfig, TlsLayer};
 use meow_transport::Transport as _;
 use smol_str::SmolStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Semaphore;
+use tokio::time::Instant;
 use tracing::{debug, trace, warn};
 
 pub use meow_common::ProxyHealth;
@@ -14,6 +16,12 @@ pub use meow_common::ProxyHealth;
 pub const GROUP_DELAY_CONCURRENCY: usize = 16;
 pub const PROVIDER_HEALTHCHECK_CONCURRENCY: usize = 10;
 pub const GLOBAL_DELAY_PROBE_CONCURRENCY: usize = 32;
+
+static UNIFIED_DELAY: AtomicBool = AtomicBool::new(false);
+
+pub fn set_unified_delay(enabled: bool) {
+    UNIFIED_DELAY.store(enabled, Ordering::Relaxed);
+}
 
 #[derive(Debug)]
 pub struct NamedProbeResult {
@@ -31,8 +39,9 @@ pub enum UrlTestError {
     Transport(String),
 }
 
-/// Probe a proxy by dialing the target, issuing an HTTP/1.1 `GET`, and
-/// reading the status line. Returns the total elapsed milliseconds on
+/// Probe a proxy by dialing the target and issuing an HTTP/1.1 `HEAD`.
+/// With unified delay enabled, a second request on the same connection
+/// measures delay without the connection handshake. Returns milliseconds on
 /// success (status within `expected`), otherwise a classified error.
 ///
 /// `expected` is a comma-separated list of status-code ranges
@@ -41,13 +50,30 @@ pub enum UrlTestError {
 /// `component/proxydialer/http.go::httpHealthCheck`.
 ///
 /// `https://` targets are tunneled through a client-side TLS handshake
-/// (`meow_transport::tls::TlsLayer`, BoringSSL by default) before the GET. HTTP targets go over the raw
+/// (`meow_transport::tls::TlsLayer`, BoringSSL by default) before the HEAD. HTTP targets go over the raw
 /// dialed connection.
 pub async fn url_test(
     adapter: &dyn ProxyAdapter,
     url: &str,
     expected: Option<&str>,
     timeout: Duration,
+) -> Result<u16, UrlTestError> {
+    url_test_with_mode(
+        adapter,
+        url,
+        expected,
+        timeout,
+        UNIFIED_DELAY.load(Ordering::Relaxed),
+    )
+    .await
+}
+
+async fn url_test_with_mode(
+    adapter: &dyn ProxyAdapter,
+    url: &str,
+    expected: Option<&str>,
+    timeout: Duration,
+    unified: bool,
 ) -> Result<u16, UrlTestError> {
     let Some(parsed) = ParsedUrl::parse(url) else {
         return Err(UrlTestError::Transport(format!("invalid url: {url}")));
@@ -75,25 +101,46 @@ pub async fn url_test(
         ..Default::default()
     };
 
-    let fut = probe_once(adapter, metadata, parsed, ranges);
-    match tokio::time::timeout(timeout, fut).await {
-        Ok(Ok(())) => {
-            let delay = start.elapsed().as_millis().min(u16::MAX as u128) as u16;
-            // Collapse sub-millisecond probes to 1 so callers can treat 0 as
-            // the "probe did not complete" sentinel when they choose to.
-            let delay = delay.max(1);
-            debug!("{} URL test: {}ms", adapter.name(), delay);
-            Ok(delay)
-        }
+    let deadline = start + timeout;
+    let first = async {
+        let mut stream = probe_connection(adapter, metadata, &parsed).await?;
+        let response = send_head(&mut stream, &parsed, unified).await?;
+        Ok::<_, String>((stream, response))
+    };
+    let (mut stream, mut response) = match tokio::time::timeout_at(deadline, first).await {
+        Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             warn!("{} URL test transport error: {}", adapter.name(), e);
-            Err(UrlTestError::Transport(e))
+            return Err(UrlTestError::Transport(e));
         }
         Err(_) => {
             warn!("{} URL test timeout after {:?}", adapter.name(), timeout);
-            Err(UrlTestError::Timeout)
+            return Err(UrlTestError::Timeout);
         }
+    };
+    let mut measured_from = start;
+    if unified && response.reusable {
+        let second = Instant::now();
+        if let Ok(Ok(next)) =
+            tokio::time::timeout_at(deadline, send_head(&mut stream, &parsed, false)).await
+        {
+            response = next;
+            measured_from = second;
+        }
+        // mihomo retains the first response when the optional repeat fails.
     }
+    if !ranges
+        .iter()
+        .any(|(lo, hi)| response.status >= *lo && response.status <= *hi)
+    {
+        return Err(UrlTestError::Transport(format!(
+            "unexpected status {}",
+            response.status
+        )));
+    }
+    let delay = (measured_from.elapsed().as_millis().min(u16::MAX as u128) as u16).max(1);
+    debug!("{} URL test: {}ms", adapter.name(), delay);
+    Ok(delay)
 }
 
 /// Probe a proxy and record the result in its [`ProxyHealth`].
@@ -205,12 +252,11 @@ fn global_delay_probe_limiter() -> &'static Semaphore {
     LIMITER.get_or_init(|| Semaphore::new(GLOBAL_DELAY_PROBE_CONCURRENCY))
 }
 
-async fn probe_once(
+async fn probe_connection(
     adapter: &dyn ProxyAdapter,
     metadata: meow_common::Metadata,
-    parsed: ParsedUrl,
-    ranges: Vec<(u16, u16)>,
-) -> Result<(), String> {
+    parsed: &ParsedUrl,
+) -> Result<Box<dyn meow_transport::Stream>, String> {
     let conn = adapter
         .dial_tcp(&metadata)
         .await
@@ -226,17 +272,22 @@ async fn probe_once(
             .connect(Box::new(conn))
             .await
             .map_err(|e| format!("tls: {e}"))?;
-        send_get_and_check(tls, &parsed, &ranges).await
+        Ok(tls)
     } else {
-        send_get_and_check(conn, &parsed, &ranges).await
+        Ok(Box::new(conn))
     }
 }
 
-async fn send_get_and_check<S>(
-    mut stream: S,
+struct ProbeResponse {
+    status: u16,
+    reusable: bool,
+}
+
+async fn send_head<S>(
+    stream: &mut S,
     parsed: &ParsedUrl,
-    ranges: &[(u16, u16)],
-) -> Result<(), String>
+    keep_alive: bool,
+) -> Result<ProbeResponse, String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -245,12 +296,13 @@ where
     use std::io::Write as _;
     let mut buf = [0u8; 512];
     let default_port = if parsed.https { 443 } else { 80 };
+    let connection = if keep_alive { "keep-alive" } else { "close" };
     let mut cursor: &mut [u8] = &mut buf;
     if parsed.port == default_port {
         write!(
             cursor,
-            "GET {path} HTTP/1.1\r\nHost: {host}\r\n\
-             User-Agent: clash.meta/{ver}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+            "HEAD {path} HTTP/1.1\r\nHost: {host}\r\n\
+             User-Agent: clash.meta/{ver}\r\nAccept: */*\r\nConnection: {connection}\r\n\r\n",
             path = parsed.path,
             host = parsed.host,
             ver = env!("CARGO_PKG_VERSION"),
@@ -258,8 +310,8 @@ where
     } else {
         write!(
             cursor,
-            "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\n\
-             User-Agent: clash.meta/{ver}\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+            "HEAD {path} HTTP/1.1\r\nHost: {host}:{port}\r\n\
+             User-Agent: clash.meta/{ver}\r\nAccept: */*\r\nConnection: {connection}\r\n\r\n",
             path = parsed.path,
             host = parsed.host,
             port = parsed.port,
@@ -275,20 +327,20 @@ where
         .map_err(|e| format!("write: {e}"))?;
     stream.flush().await.map_err(|e| format!("flush: {e}"))?;
 
-    let status = read_status_line(&mut stream).await?;
-    trace!(status, "url_test: received status");
-    if ranges.iter().any(|(lo, hi)| status >= *lo && status <= *hi) {
-        Ok(())
-    } else {
-        Err(format!("unexpected status {status}"))
+    for _ in 0..8 {
+        let response = read_response_head(stream).await?;
+        if response.status >= 200 {
+            return Ok(response);
+        }
     }
+    Err("too many informational responses".into())
 }
 
-async fn read_status_line<S>(stream: &mut S) -> Result<u16, String>
+async fn read_response_head<S>(stream: &mut S) -> Result<ProbeResponse, String>
 where
     S: tokio::io::AsyncRead + Unpin,
 {
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; 16384];
     let mut len = 0usize;
     let mut byte = [0u8; 1];
     loop {
@@ -297,17 +349,23 @@ where
             .await
             .map_err(|e| format!("read: {e}"))?;
         if n == 0 {
-            return Err("eof before status line".into());
+            return Err("eof before response headers".into());
         }
         if len < buf.len() {
             buf[len] = byte[0];
             len += 1;
         }
-        if buf[..len].ends_with(b"\r\n") || len >= buf.len() {
+        if buf[..len].ends_with(b"\r\n\r\n") {
             break;
         }
+        if len >= buf.len() {
+            return Err("response headers too large".into());
+        }
     }
-    let line = std::str::from_utf8(&buf[..len]).map_err(|_| "status line not utf-8".to_string())?;
+    let head =
+        std::str::from_utf8(&buf[..len]).map_err(|_| "response headers not utf-8".to_string())?;
+    let mut lines = head.split("\r\n");
+    let line = lines.next().unwrap_or("");
     // HTTP/1.x status line: "HTTP/1.1 204 No Content\r\n"
     let mut parts = line.split_whitespace();
     let version = parts.next().unwrap_or("");
@@ -317,9 +375,23 @@ where
     let code_str = parts
         .next()
         .ok_or_else(|| format!("missing status code: {line:?}"))?;
-    code_str
+    let status = code_str
         .parse::<u16>()
-        .map_err(|_| format!("bad status code: {code_str:?}"))
+        .map_err(|_| format!("bad status code: {code_str:?}"))?;
+    let mut reusable = version == "HTTP/1.1";
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("connection") {
+                for token in value.split(',') {
+                    if token.trim().eq_ignore_ascii_case("close") {
+                        reusable = false;
+                    }
+                }
+            }
+        }
+    }
+    trace!(status, "url_test: received status");
+    Ok(ProbeResponse { status, reusable })
 }
 
 #[derive(Debug, Clone)]
@@ -413,6 +485,111 @@ fn parse_expected(spec: Option<&str>) -> Result<Vec<(u16, u16)>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ProbeAdapter {
+        stream: parking_lot::Mutex<Option<tokio::io::DuplexStream>>,
+        health: ProxyHealth,
+    }
+
+    #[async_trait::async_trait]
+    impl ProxyAdapter for ProbeAdapter {
+        fn name(&self) -> &str {
+            "probe"
+        }
+        fn addr(&self) -> &str {
+            ""
+        }
+        fn adapter_type(&self) -> meow_common::AdapterType {
+            meow_common::AdapterType::Direct
+        }
+        fn support_udp(&self) -> bool {
+            false
+        }
+        fn health(&self) -> &ProxyHealth {
+            &self.health
+        }
+        async fn dial_tcp(
+            &self,
+            _: &meow_common::Metadata,
+        ) -> meow_common::Result<Box<dyn meow_common::ProxyConn>> {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let stream = self
+                .stream
+                .lock()
+                .take()
+                .expect("probe must reuse its connection");
+            Ok(Box::new(crate::stream_conn::StreamConn(Box::new(stream))))
+        }
+        async fn dial_udp(
+            &self,
+            _: &meow_common::Metadata,
+        ) -> meow_common::Result<Box<dyn meow_common::ProxyPacketConn>> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unified_delay_reuses_the_connection_and_preserves_a_success_on_repeat_failure() {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        for (unified, second, expected_delay) in [
+            (false, "none", 105),
+            (true, "success", 7),
+            (true, "close", 105),
+            (true, "timeout", 500),
+        ] {
+            let (client, server) = tokio::io::duplex(1024);
+            let adapter = ProbeAdapter {
+                stream: parking_lot::Mutex::new(Some(client)),
+                health: ProxyHealth::new(),
+            };
+            let task = tokio::spawn(async move {
+                let mut server = BufReader::new(server);
+                let count = if unified { 2 } else { 1 };
+                for index in 0..count {
+                    let mut line = String::new();
+                    server.read_line(&mut line).await.unwrap();
+                    assert!(line.starts_with("HEAD /probe HTTP/1.1"));
+                    loop {
+                        line.clear();
+                        server.read_line(&mut line).await.unwrap();
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    if index == 1 {
+                        match second {
+                            "close" => return,
+                            "timeout" => {
+                                std::future::pending::<()>().await;
+                            }
+                            _ => {}
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(if index == 0 { 5 } else { 7 })).await;
+                    // A HEAD response can advertise a body length without sending a body.
+                    server
+                        .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 999\r\n\r\n")
+                        .await
+                        .unwrap();
+                }
+            });
+            let delay = url_test_with_mode(
+                &adapter,
+                "http://example.test/probe",
+                None,
+                Duration::from_millis(500),
+                unified,
+            )
+            .await
+            .unwrap();
+            assert_eq!(delay, expected_delay, "{second}");
+            if second == "timeout" {
+                task.abort();
+            } else {
+                task.await.unwrap();
+            }
+        }
+    }
 
     #[test]
     fn parsed_url_cases() {

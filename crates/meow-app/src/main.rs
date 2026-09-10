@@ -806,6 +806,7 @@ async fn run(
     }
 
     // Create the tunnel (core routing engine)
+    meow_proxy::health::set_unified_delay(config.raw.unified_delay.unwrap_or(false));
     let tunnel = Tunnel::new(Arc::clone(&config.dns.resolver));
     tunnel.set_mode(config.general.mode);
     tunnel.update_routing(config.proxies, config.rules);
