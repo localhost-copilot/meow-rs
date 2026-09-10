@@ -69,6 +69,36 @@ enum MatchKind {
 }
 
 impl<T: Clone + 'static> DomainTrie<T> {
+    /// Visit every stored value, including wildcard entries, in unspecified order.
+    pub fn for_each_value(&self, mut visit: impl FnMut(&T)) {
+        fn building<T>(node: &BuildNode<T>, visit: &mut impl FnMut(&T)) {
+            for value in [&node.exact_value, &node.star_value, &node.dot_value]
+                .into_iter()
+                .flatten()
+            {
+                visit(value);
+            }
+            for child in node.children.values() {
+                building(child, visit);
+            }
+        }
+        fn sealed<T>(node: &SealedNode<T>, visit: &mut impl FnMut(&T)) {
+            for value in [&node.exact_value, &node.star_value, &node.dot_value]
+                .into_iter()
+                .flatten()
+            {
+                visit(value);
+            }
+            for (_, child) in &node.children {
+                sealed(child, visit);
+            }
+        }
+        match &self.state {
+            TrieState::Building(root) => building(root, &mut visit),
+            TrieState::Sealed(root) => sealed(root, &mut visit),
+        }
+    }
+
     pub fn new() -> Self {
         DomainTrie {
             state: TrieState::Building(BuildNode::default()),

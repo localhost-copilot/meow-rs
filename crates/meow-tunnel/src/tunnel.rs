@@ -406,7 +406,7 @@ pub struct Tunnel {
 impl Tunnel {
     pub fn new(resolver: Arc<Resolver>) -> Self {
         let direct = Arc::new(DirectAdapter::new().with_resolver(Arc::clone(&resolver)));
-        Self {
+        let tunnel = Self {
             inner: Arc::new(TunnelInner {
                 udp_sniffer: RwLock::new(Arc::new(crate::sniffer::UdpSniffer::new(
                     Default::default(),
@@ -423,7 +423,17 @@ impl Tunnel {
                 needs_process_lookup: AtomicBool::new(false),
                 tun_handle: RwLock::new(None),
             }),
-        }
+        };
+        tunnel.bind_dns_resolver(&tunnel.inner.resolver);
+        tunnel
+    }
+
+    /// Attach a dedicated DNS resolver to this tunnel's live outbound registry.
+    pub fn bind_dns_resolver(&self, resolver: &Resolver) {
+        let weak = Arc::downgrade(&self.inner);
+        resolver.set_proxy_lookup(Arc::new(move |name| {
+            weak.upgrade()?.route.read().proxies.get(name).cloned()
+        }));
     }
 
     pub fn inner(&self) -> &Arc<TunnelInner> {
@@ -637,6 +647,83 @@ impl Clone for Tunnel {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn dns_outbounds_follow_selection_reload_and_release_the_resolver() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let len = stream.read_u16().await.unwrap();
+                let mut query = vec![0; usize::from(len)];
+                stream.read_exact(&mut query).await.unwrap();
+                let mut end = 12;
+                while query[end] != 0 {
+                    end += usize::from(query[end]) + 1;
+                }
+                query.truncate(end + 5);
+                query[2..4].copy_from_slice(&[0x81, 0x80]);
+                query[6..12].copy_from_slice(&[0, 1, 0, 0, 0, 0]);
+                query.extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 0, 0, 4, 192, 0, 2, 42]);
+                stream.write_u16(query.len() as u16).await.unwrap();
+                stream.write_all(&query).await.unwrap();
+            }
+        });
+        let config = meow_config::load_config_from_str(&format!(
+            "profile: {{store-selected: false}}
+proxy-groups: [{{name: choice, type: select, proxies: [DIRECT, REJECT]}}]
+dns:
+  enable: true
+  use-system-hosts: false
+  nameserver: ['tcp://{addr}#choice']
+  nameserver-policy:
+    '+.wild.test': ['tcp://{addr}#choice']
+    wild.test: ['tcp://{addr}#REJECT']
+"
+        ))
+        .await
+        .unwrap();
+        let resolver = Arc::clone(&config.dns.resolver);
+        let weak = Arc::downgrade(&resolver);
+        let expected = Some("192.0.2.42".parse().unwrap());
+        assert_eq!(resolver.lookup_ipv4("first.test").await, expected);
+        config.proxies["choice"]
+            .selection()
+            .unwrap()
+            .set("REJECT")
+            .await
+            .unwrap();
+        assert_eq!(resolver.lookup_ipv4("second.test").await, None);
+        config.proxies["choice"]
+            .selection()
+            .unwrap()
+            .set("DIRECT")
+            .await
+            .unwrap();
+        assert_eq!(resolver.lookup_ipv4("sub.wild.test").await, expected);
+
+        let tunnel = Tunnel::new(Arc::clone(&resolver));
+        tunnel.update_routing(config.proxies.clone(), vec![]);
+        assert_eq!(resolver.lookup_ipv4("third.test").await, expected);
+        let replacement = Arc::new(meow_proxy::group::selector::SelectorGroup::new(
+            "choice",
+            vec![Arc::clone(&config.proxies["REJECT"])],
+        )) as Arc<dyn Proxy>;
+        tunnel.update_routing(HashMap::from([("choice".into(), replacement)]), vec![]);
+        assert_eq!(resolver.lookup_ipv4("fourth.test").await, None);
+        tunnel.update_routing(HashMap::new(), vec![]);
+        assert_eq!(resolver.lookup_ipv4("fifth.test").await, None);
+        drop(config);
+        drop(tunnel);
+        drop(resolver);
+        assert!(
+            weak.upgrade().is_none(),
+            "DNS must not keep its routing owner alive"
+        );
+        server.abort();
+    }
+
     use super::*;
     use meow_common::DnsMode;
     use meow_dns::Resolver;

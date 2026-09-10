@@ -2306,6 +2306,19 @@ async fn build_config(
     .await?;
 
     // Listener config
+    // DNS was built before the final resolver-aware registry. Keep only weak
+    // references: DIRECT and proxy adapters can themselves own this resolver.
+    let dns_proxies: HashMap<_, _> = proxies
+        .iter()
+        .map(|(name, proxy)| (name.clone(), Arc::downgrade(proxy)))
+        .collect();
+    let lookup: meow_dns::client::ProxyLookup =
+        Arc::new(move |name| dns_proxies.get(name).and_then(std::sync::Weak::upgrade));
+    dns_config.resolver.set_proxy_lookup(Arc::clone(&lookup));
+    if let Some(resolver) = &dns_config.proxy_resolver {
+        resolver.set_proxy_lookup(lookup);
+    }
+
     let bind_addr = if general.allow_lan {
         general.bind_address.clone()
     } else {
