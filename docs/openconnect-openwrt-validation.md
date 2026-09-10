@@ -72,9 +72,12 @@ CI 新增 ARM64 musl 静态构建和本地模拟测试；本地验证不代表�
 实际 QEMU 安装验证使用 `aarch64_generic`。上述哈希对应本地交付文件，重新打包后的
 压缩包时间戳可能不同。
 
-本轮验证的是 ARM64 虚拟机上的真实 OpenWrt 内核和用户空间，未连接物理路由器，
+本报告记录的是 ARM64 虚拟机上的真实 OpenWrt 内核和用户空间，当时未连接物理路由器，
 也未在路由器硬件上测量吞吐。x86_64、MIPS 和 32 位 ARM 不在本轮实测范围。
 默认发布包仍未开启 OpenConnect。静态 OpenSSL 更新需要重新构建和替换 meow。
+
+后续已完成 [ARM64 物理路由器验证](openconnect-router-validation.md)，包含三种模式、
+双栈 TCP/UDP、DTLS 故障和恢复；该实机测试未进行满载吞吐对比。
 
 资料：[OpenWrt 镜像及校验值](https://downloads.openwrt.org/releases/24.10.7/targets/armsr/armv8/)、
 [openssl-src 构建库](https://github.com/alexcrichton/openssl-src-rs)、
