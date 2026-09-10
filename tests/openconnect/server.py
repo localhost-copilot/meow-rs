@@ -5,6 +5,14 @@ import threading
 import os
 import http.server
 
+mtu = int(os.environ.get("OCSERV_MTU", "1400"))
+assert 576 <= mtu <= 65535
+cipher = os.environ.get("OCSERV_CIPHER", "AES-128-GCM")
+assert cipher in ("AES-128-GCM", "AES-256-GCM")
+ipv6 = "" if os.environ.get("OCSERV_IPV6") == "false" else '''ipv6-network = 2001:db8::/64
+ipv6-subnet-prefix = 128
+'''
+
 subprocess.run([
     "openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
     "-nodes", "-keyout", "/run/key.pem", "-out", "/fixture/ca.pem", "-days", "1",
@@ -35,12 +43,10 @@ use-occtl = true
 device = vpns
 ipv4-network = 192.0.2.0
 ipv4-netmask = 255.255.255.0
-ipv6-network = 2001:db8::/64
-ipv6-subnet-prefix = 128
-dns = 192.0.2.1
+{ipv6}dns = 192.0.2.1
 route = default
 cisco-client-compat = {os.environ.get("OCSERV_CISCO_COMPAT", "true")}
-mtu = 1400
+mtu = {mtu}
 compression = {os.environ.get("OCSERV_COMPRESSION", "false")}
 select-group = engineering[Engineering]
 ''')
@@ -49,7 +55,7 @@ select-group = engineering[Engineering]
         config.write('tls-priorities = "NORMAL:%SERVER_PRECEDENCE:-VERS-TLS1.3:-CIPHER-ALL:+AES-128-CBC"\n')
     elif os.environ.get("OCSERV_CISCO_COMPAT") == "false":
         # Both kernels support this AEAD; fix it for comparable crypto costs.
-        config.write('tls-priorities = "NORMAL:%SERVER_PRECEDENCE:-CIPHER-ALL:+AES-128-GCM"\n')
+        config.write(f'tls-priorities = "NORMAL:%SERVER_PRECEDENCE:-CIPHER-ALL:+{cipher}"\n')
 
 
 def echo(stream):

@@ -269,11 +269,15 @@ async fn benchmark_real_ocserv_tls_dtls() {
     let selected = std::env::var("MEOW_BENCH_MODE").ok();
     assert!(selected
         .as_deref()
-        .is_none_or(|mode| matches!(mode, "off" | "require")));
-    for mode in ["off", "require"] {
-        if selected.as_deref().is_some_and(|selected| selected != mode) {
-            continue;
+        .is_none_or(|mode| matches!(mode, "off" | "auto" | "require")));
+    let modes = match selected.as_deref() {
+        Some(mode) => vec![mode],
+        None if benchmark::Profile::selected() == benchmark::Profile::Legacy => {
+            vec!["off", "require"]
         }
+        None => vec!["auto"],
+    };
+    for mode in modes {
         ocserv_roundtrip(mode, false, true).await;
     }
 }
@@ -326,7 +330,7 @@ async fn ocserv_configured_roundtrip(
         }
     }
     let timeout = if measure && std::env::var("MEOW_BENCH_WORKLOAD").as_deref() == Ok("iperf3") {
-        600 // Up to ten samples of four 12-second transfers per mode.
+        900 // Up to ten samples of six 12-second transfers per mode.
     } else if measure {
         300
     } else {
@@ -345,13 +349,25 @@ async fn ocserv_configured_roundtrip(
         let compatibility_env = if measure { "OCSERV_CISCO_COMPAT=false" } else { "OCSERV_CISCO_COMPAT=true" };
         let compression_env = format!("OCSERV_COMPRESSION={}", compression != "off");
         let legacy_env = format!("OCSERV_LEGACY_DTLS={legacy}");
-        let output = tokio::process::Command::new("docker").args([
+        let mut docker = tokio::process::Command::new("docker");
+        docker.args([
             "run", "--rm", "-d", "--cap-add", "NET_ADMIN", "--device", "/dev/net/tun",
             "--sysctl", "net.ipv6.conf.all.disable_ipv6=0", "-p", "127.0.0.1::443", "-v", &mount,
             "-p", &udp_mapping, "-e", &udp_env, "-e", dpd_env, "-e", compatibility_env,
             "-e", &compression_env, "-e", &legacy_env,
-            "meow-openconnect-ocserv:test",
-        ]).output().await.unwrap();
+        ]);
+        #[cfg(all(feature = "openconnect-dtls", unix))]
+        if measure {
+            for (key, value) in benchmark::Profile::selected().server_env() {
+                docker.args(["-e", &format!("{key}={value}")]);
+            }
+        }
+        let image = if measure {
+            std::env::var("MEOW_BENCH_OCSERV_IMAGE").unwrap_or_else(|_| "meow-openconnect-ocserv:test".into())
+        } else {
+            "meow-openconnect-ocserv:test".into()
+        };
+        let output = docker.arg(image).output().await.unwrap();
         assert!(output.status.success(), "docker run failed: {}", String::from_utf8_lossy(&output.stderr));
         let container = Container(String::from_utf8(output.stdout).unwrap().trim().to_owned());
         let output = tokio::process::Command::new("docker").args(["port", &container.0, "443/tcp"]).output().await.unwrap();
@@ -370,7 +386,7 @@ async fn ocserv_configured_roundtrip(
         let yaml = format!("{yaml}    dtls-mode: {mode}\n    mtu: 1400\n    compression: {compression}\n    reconnect-timeout: 5\n{extra}rules:\n  - MATCH,vpn\n");
         #[cfg(all(feature = "openconnect-dtls", unix))]
         if measure {
-            benchmark::run(&yaml, mode, &container.0).await;
+            benchmark::run(&benchmark::Profile::selected().configure(&yaml), mode, &container.0).await;
             return;
         }
         let config = meow_config::load_config_from_str(&yaml).await.unwrap();

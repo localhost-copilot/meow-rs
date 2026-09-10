@@ -5,6 +5,67 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    Legacy,
+    A,
+    B,
+}
+
+impl Profile {
+    pub fn selected() -> Self {
+        match std::env::var("MEOW_BENCH_PROFILE").as_deref() {
+            Err(_) | Ok("legacy") => Self::Legacy,
+            Ok("a") => Self::A,
+            Ok("b") => Self::B,
+            _ => panic!("MEOW_BENCH_PROFILE must be legacy, a or b"),
+        }
+    }
+
+    fn server_mtu(self) -> u16 {
+        match self {
+            Self::Legacy => 1400,
+            Self::A => 1280,
+            Self::B => 1383,
+        }
+    }
+
+    fn cipher(self) -> &'static str {
+        match std::env::var("MEOW_BENCH_CIPHER").as_deref() {
+            Ok("AES-128-GCM") => "AES-128-GCM",
+            Ok("AES-256-GCM") => "AES-256-GCM",
+            Err(_) if self == Self::Legacy => "AES-128-GCM",
+            Err(_) => "AES-256-GCM",
+            _ => panic!("MEOW_BENCH_CIPHER must be AES-128-GCM or AES-256-GCM"),
+        }
+    }
+
+    pub fn server_env(self) -> [(&'static str, String); 3] {
+        [
+            ("OCSERV_MTU", self.server_mtu().to_string()),
+            ("OCSERV_CIPHER", self.cipher().into()),
+            ("OCSERV_IPV6", (self == Self::Legacy).to_string()),
+        ]
+    }
+
+    pub fn configure(self, yaml: &str) -> String {
+        if self == Self::Legacy {
+            return yaml.into();
+        }
+        // Public fixture values only; the private YAML is never loaded here.
+        let mut config: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let proxy = &mut config["proxies"][0];
+        proxy["mtu"] = 0.into();
+        proxy["base-mtu"] = 0.into();
+        proxy["compression"] = "stateless".into();
+        proxy["ipv6-disabled"] = (self == Self::A).into();
+        proxy["queue-length"] = if self == Self::A { 128 } else { 32 }.into();
+        proxy["dpd-interval"] = 5.into();
+        proxy["reconnect-timeout"] = if self == Self::A { 60 } else { 300 }.into();
+        serde_yaml::to_string(&config).unwrap()
+    }
+}
+
 pub async fn run(yaml: &str, mode: &str, container: &str) {
     if let Ok(binary) = std::env::var("MEOW_BENCH_PROXY_BINARY") {
         let directory = tempfile::tempdir().unwrap();
@@ -15,25 +76,12 @@ pub async fn run(yaml: &str, mode: &str, container: &str) {
         // mihomo's `ca` is PEM text; meow's is a file path. Keep the actual
         // trust anchor identical while adapting this configuration syntax.
         let yaml = if std::env::var("MEOW_BENCH_PROXY_KIND").as_deref() == Ok("mihomo") {
-            let line = yaml
-                .lines()
-                .find(|line| line.starts_with("    ca: '"))
-                .unwrap();
-            let ca_path = line
-                .trim()
-                .strip_prefix("ca: '")
+            let mut config: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+            let ca = &mut config["proxies"][0]["ca"];
+            *ca = std::fs::read_to_string(ca.as_str().unwrap())
                 .unwrap()
-                .strip_suffix('\'')
-                .unwrap();
-            let pem = std::fs::read_to_string(ca_path).unwrap();
-            let inline = format!(
-                "    ca: |\n{}",
-                pem.lines()
-                    .map(|line| format!("      {line}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            );
-            yaml.replace(line, &inline)
+                .into();
+            serde_yaml::to_string(&config).unwrap()
         } else {
             yaml.to_owned()
         };
@@ -54,6 +102,7 @@ pub async fn run(yaml: &str, mode: &str, container: &str) {
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        println!("BENCH_PROXY_PID,{}", process.id().unwrap());
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 assert!(
@@ -87,6 +136,39 @@ pub async fn run(yaml: &str, mode: &str, container: &str) {
 }
 
 async fn workload(address: SocketAddr, mode: &str, container: &str) {
+    let (mut warm, _) = super::socks_target(address, 1, "192.0.2.1:8080".parse().unwrap()).await;
+    warm.write_all(&[0x5a; 128]).await.unwrap();
+    let mut answer = [0; 128];
+    if let Err(error) = warm.read_exact(&mut answer).await {
+        let logs = tokio::process::Command::new("docker")
+            .args(["logs", container])
+            .output()
+            .await
+            .unwrap();
+        panic!(
+            "local benchmark warmup failed: {error}; ocserv: {}",
+            String::from_utf8_lossy(&logs.stderr)
+        );
+    }
+    assert_eq!(answer, [0x5a; 128]);
+    if mode != "off" {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if session_status(container)
+                    .await
+                    .to_string()
+                    .contains("DTLS1.2")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("benchmark must establish DTLS before timing");
+    }
+    inspect_session(container, mode).await;
+    drop(warm);
     if std::env::var("MEOW_BENCH_WORKLOAD").as_deref() == Ok("iperf3") {
         iperf(address, mode, container).await;
         return;
@@ -225,7 +307,7 @@ async fn workload(address: SocketAddr, mode: &str, container: &str) {
     drop(control);
 }
 
-async fn inspect_session(container: &str, mode: &str) {
+async fn session_status(container: &str) -> serde_json::Value {
     // Query the live server's session description outside timed intervals.
     // This verifies DTLS without a forwarding hop or per-packet instrumentation.
     let status = tokio::process::Command::new("docker")
@@ -247,23 +329,32 @@ async fn inspect_session(container: &str, mode: &str) {
         status.contains("fixture-user"),
         "live VPN session missing from occtl"
     );
-    let dtls = status.contains("DTLS1.2");
-    let sessions: serde_json::Value = serde_json::from_str(&status).unwrap();
+    serde_json::from_str(&status).unwrap()
+}
+
+async fn inspect_session(container: &str, mode: &str) {
+    let sessions = session_status(container).await;
+    let dtls = sessions.to_string().contains("DTLS1.2");
     let session = &sessions[0];
+    let profile = Profile::selected();
     assert!(session["TLS ciphersuite"]
         .as_str()
         .unwrap()
-        .contains("AES-128-GC"));
-    if mode == "require" {
+        .contains(profile.cipher().trim_end_matches('M')));
+    if mode != "off" {
         assert!(session["DTLS cipher"]
             .as_str()
             .unwrap()
-            .contains("(PSK)-(AES-128-GCM)"));
+            .contains(&format!("(PSK)-({})", profile.cipher())));
     }
     // ocserv subtracts carrier overhead and adjusts again after DTLS negotiation.
     assert_eq!(
         session["MTU"].as_str(),
-        Some(if mode == "require" { "1334" } else { "1372" })
+        Some(
+            (profile.server_mtu() - if mode == "off" { 28 } else { 66 })
+                .to_string()
+                .as_str()
+        )
     );
     for field in ["MTU", "TLS ciphersuite", "DTLS cipher", "DTLS ciphersuite"] {
         if let Some(value) = session[field].as_str() {
@@ -272,7 +363,7 @@ async fn inspect_session(container: &str, mode: &str) {
     }
     assert_eq!(
         dtls,
-        mode == "require",
+        mode != "off",
         "server DTLS session disagrees with requested mode"
     );
     println!("BENCH_TRANSPORT,{mode},direct-docker-port,server-dtls-session={dtls}");
@@ -283,6 +374,27 @@ async fn iperf(address: SocketAddr, mode: &str, container: &str) {
         value.parse().expect("invalid iperf sample count")
     });
     assert!((1..=10).contains(&samples));
+    let directions = std::env::var("MEOW_BENCH_IPERF_DIRECTIONS").unwrap_or_else(|_| {
+        if Profile::selected() == Profile::Legacy {
+            "upload,download"
+        } else {
+            "upload,download,bidir"
+        }
+        .into()
+    });
+    let directions: Vec<_> = directions.split(',').collect();
+    assert!(
+        !directions.is_empty()
+            && directions
+                .iter()
+                .all(|direction| matches!(*direction, "upload" | "download" | "bidir"))
+    );
+    let streams = std::env::var("MEOW_BENCH_IPERF_STREAMS").unwrap_or_else(|_| "1,4".into());
+    let streams: Vec<usize> = streams
+        .split(',')
+        .map(|value| value.parse().unwrap())
+        .collect();
+    assert!(!streams.is_empty() && streams.iter().all(|count| matches!(count, 1 | 4)));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port().to_string();
     // iperf3 has no SOCKS support. Forward both control and data TCP connections
@@ -321,8 +433,13 @@ async fn iperf(address: SocketAddr, mode: &str, container: &str) {
             .unwrap()
     );
     network_counters(container, mode, "before").await;
-    for reverse in [false, true] {
-        for concurrency in [1, 4] {
+    for direction in directions {
+        let label = match direction {
+            "upload" => "false",
+            "download" => "true",
+            _ => "bidir",
+        };
+        for concurrency in &streams {
             for sample in 1..=samples {
                 let mut command = tokio::process::Command::new("iperf3");
                 command.args([
@@ -338,8 +455,10 @@ async fn iperf(address: SocketAddr, mode: &str, container: &str) {
                     "2",
                     "-J",
                 ]);
-                if reverse {
+                if direction == "download" {
                     command.arg("-R");
+                } else if direction == "bidir" {
+                    command.arg("--bidir");
                 }
                 let output = command.kill_on_drop(true).output().await.unwrap();
                 assert!(
@@ -354,15 +473,28 @@ async fn iperf(address: SocketAddr, mode: &str, container: &str) {
                     .as_f64()
                     .unwrap();
                 assert!(rate > 0.0);
-                println!(
-                    "BENCH_IPERF,{mode},{reverse},{concurrency},{sample},{:.3}",
-                    rate / 1_000_000.0
-                );
-                println!("BENCH_IPERF_JSON,{mode},{reverse},{concurrency},{sample},{report}");
+                if direction == "bidir" {
+                    let reverse_rate = report["end"]["sum_received_bidir_reverse"]
+                        ["bits_per_second"]
+                        .as_f64()
+                        .unwrap();
+                    assert!(reverse_rate > 0.0);
+                    println!(
+                        "BENCH_IPERF_BIDIR,{mode},{concurrency},{sample},{:.3},{:.3}",
+                        rate / 1_000_000.0,
+                        reverse_rate / 1_000_000.0
+                    );
+                } else {
+                    println!(
+                        "BENCH_IPERF,{mode},{label},{concurrency},{sample},{:.3}",
+                        rate / 1_000_000.0
+                    );
+                }
+                println!("BENCH_IPERF_JSON,{mode},{label},{concurrency},{sample},{report}");
                 network_counters(
                     container,
                     mode,
-                    &format!("iperf-{reverse}-{concurrency}-{sample}"),
+                    &format!("iperf-{label}-{concurrency}-{sample}"),
                 )
                 .await;
             }
