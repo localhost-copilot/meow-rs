@@ -45,9 +45,9 @@ pub enum UrlTestError {
 /// success (status within `expected`), otherwise a classified error.
 ///
 /// `expected` is a comma-separated list of status-code ranges
-/// (e.g. `"200"`, `"200-299"`, `"200,204-206"`). When `None`, any 2xx
-/// status counts as success — matching upstream Go mihomo's default in
-/// `component/proxydialer/http.go::httpHealthCheck`.
+/// (e.g. `"200"`, `"200-299"`, `"200,204-206"`). When omitted or empty,
+/// any completed HTTP response counts as success, matching mihomo's
+/// `adapter/adapter.go::Proxy.URLTest`.
 ///
 /// `https://` targets are tunneled through a client-side TLS handshake
 /// (`meow_transport::tls::TlsLayer`, BoringSSL by default) before the HEAD. HTTP targets go over the raw
@@ -129,9 +129,10 @@ async fn url_test_with_mode(
         }
         // mihomo retains the first response when the optional repeat fails.
     }
-    if !ranges
-        .iter()
-        .any(|(lo, hi)| response.status >= *lo && response.status <= *hi)
+    if !ranges.is_empty()
+        && !ranges
+            .iter()
+            .any(|(lo, hi)| response.status >= *lo && response.status <= *hi)
     {
         return Err(UrlTestError::Transport(format!(
             "unexpected status {}",
@@ -444,11 +445,11 @@ impl ParsedUrl {
 }
 
 /// Parse an `expected` query-param value into inclusive status-code ranges.
-/// Empty / `None` defaults to `[200..=299]`, matching upstream.
+/// Empty / `None` returns no restrictions, matching upstream.
 fn parse_expected(spec: Option<&str>) -> Result<Vec<(u16, u16)>, String> {
     let s = spec.unwrap_or("").trim();
     if s.is_empty() {
-        return Ok(vec![(200, 299)]);
+        return Ok(Vec::new());
     }
     let mut out = Vec::new();
     for piece in s.split(',') {
@@ -652,12 +653,8 @@ mod tests {
             Option<&'static [(u16, u16)]>,
         );
         let cases: &[Case] = &[
-            ("default: None is 2xx", None, Some(&[(200, 299)])),
-            (
-                "default: empty string is 2xx",
-                Some(""),
-                Some(&[(200, 299)]),
-            ),
+            ("default: None is unrestricted", None, Some(&[])),
+            ("default: empty string is unrestricted", Some(""), Some(&[])),
             (
                 "mixed list of codes and ranges",
                 Some("200,204-206,301"),

@@ -2502,7 +2502,7 @@ async fn g3_get_proxy_delay_url_encoded_name() {
 // responds with a configurable HTTP/1.1 status line, so we can drive the
 // `expected`-param path and the "bad status → 503" contract without a
 // real socket. Upstream: `hub/route/proxies.go::getProxyDelay` + the
-// `httpHealthCheck` helper in `component/proxydialer/http.go`.
+// `Proxy.URLTest` in `adapter/adapter.go`.
 
 #[tokio::test]
 async fn h_series_expected_status_table() {
@@ -2534,13 +2534,23 @@ async fn h_series_expected_status_table() {
             want_body: None,
         },
         Case {
-            // h2: 500 -> default expected (2xx) misses -> transport error -> 503.
-            label: "h2_default_expected_rejects_non_2xx",
+            // A received response proves connectivity even when its status is
+            // an error. Filtering is opt-in, as in mihomo's URLTest.
+            label: "h2_default_expected_accepts_non_2xx",
             canned_status: 500,
             canned_reason: "Server Error",
             expected_param: None,
-            want_http: StatusCode::SERVICE_UNAVAILABLE,
-            want_body: Some(ERR_BODY),
+            want_http: StatusCode::OK,
+            want_body: None,
+        },
+        Case {
+            // The YAML's DNS probe endpoint can reject HEAD with 405.
+            label: "empty_expected_accepts_head_rejection",
+            canned_status: 405,
+            canned_reason: "Method Not Allowed",
+            expected_param: Some(""),
+            want_http: StatusCode::OK,
+            want_body: None,
         },
         Case {
             // h3: 301 is outside 2xx but within the explicit range the caller
@@ -2559,7 +2569,7 @@ async fn h_series_expected_status_table() {
             canned_reason: "No Content",
             expected_param: Some("200"),
             want_http: StatusCode::SERVICE_UNAVAILABLE,
-            want_body: None,
+            want_body: Some(ERR_BODY),
         },
     ];
 
@@ -2608,16 +2618,22 @@ async fn h_series_expected_status_table() {
 }
 
 #[tokio::test]
-async fn h5_group_member_bad_status_is_zero() {
-    // Group member whose HTTP response is 500 records as 0 in the map,
-    // alongside a successful member. Matches upstream group behaviour:
-    // per-member failures are map-zero, not a top-level error.
+async fn h5_group_member_outside_explicit_status_range_is_zero() {
+    // An explicitly restricted status range records a rejected member as
+    // zero without turning the whole group probe into an error.
     let good = TestAdapter::new("good", DialBehavior::InstantOk).into_proxy();
     let bad = TestAdapter::new("bad", DialBehavior::InstantStatus(500, "Oops")).into_proxy();
     let group = fallback_group("G", vec![Arc::clone(&good), Arc::clone(&bad)]);
     let state = state_with_proxies(vec![("good", good), ("bad", bad), ("G", group)]);
     let app = create_router(state);
-    let resp = delay_req(app, format!("/group/G/delay?url={}&timeout=1000", url_q())).await;
+    let resp = delay_req(
+        app,
+        format!(
+            "/group/G/delay?url={}&timeout=1000&expected=200-299",
+            url_q()
+        ),
+    )
+    .await;
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = resp.into_body().collect().await.unwrap().to_bytes();
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
