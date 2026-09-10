@@ -21,7 +21,7 @@ use tracing::warn;
 
 use crate::parser::{parse_rule, ParserContext};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuleSetBehavior {
     Domain,
     IpCidr,
@@ -50,7 +50,7 @@ impl fmt::Display for RuleSetBehavior {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuleSetFormat {
     Yaml,
     Text,
