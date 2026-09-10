@@ -943,10 +943,27 @@ async fn run(
                     nl.spec
                 );
             }
-            ListenerSpec::TProxy { sni } => {
+            ListenerSpec::TProxy { sni } | ListenerSpec::Redir { sni } => {
                 #[cfg(feature = "listener-tproxy")]
                 {
-                    let socket = match tokio::net::TcpListener::bind(addr).await {
+                    use meow_listener::tproxy::TransparentMode;
+                    let is_redir = matches!(nl.spec, ListenerSpec::Redir { .. });
+                    let listener = TProxyListener::new(
+                        tunnel.clone(),
+                        addr,
+                        *sni,
+                        config.listeners.routing_mark,
+                        nl.name.clone(),
+                    )
+                    .with_mode(if is_redir {
+                        TransparentMode::Redir
+                    } else {
+                        TransparentMode::TProxy
+                    })
+                    .with_auto_route(!is_redir && config.listeners.tproxy_auto_route)
+                    .with_sniffer(Arc::clone(&sniffer_runtime))
+                    .with_max_connections(nl.max_connections);
+                    let socket = match listener.bind().await {
                         Ok(s) => s,
                         Err(e) => {
                             error!("listener '{}': bind {} failed: {}", nl.name, addr, e);
@@ -955,15 +972,6 @@ async fn run(
                     };
                     let bound = socket.local_addr().unwrap_or(addr);
                     nl.port = bound.port();
-                    let listener = TProxyListener::new(
-                        tunnel.clone(),
-                        bound,
-                        *sni,
-                        config.listeners.routing_mark,
-                        nl.name.clone(),
-                    )
-                    .with_sniffer(Arc::clone(&sniffer_runtime))
-                    .with_max_connections(nl.max_connections);
                     tokio::spawn(async move {
                         if let Err(e) = listener.run_on(socket).await {
                             error!("TProxy listener error: {}", e);

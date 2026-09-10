@@ -167,6 +167,9 @@ pub struct RawConfig {
     pub sub_rules: Option<HashMap<String, Vec<String>>>,
     pub subscriptions: Option<Vec<RawSubscription>>,
     pub tproxy_port: Option<u16>,
+    pub redir_port: Option<u16>,
+    /// Opt into meow's legacy local TCP NAT rules instead of external TPROXY.
+    pub tproxy_auto_route: Option<bool>,
     pub tproxy_sni: Option<bool>,
     pub routing_mark: Option<u32>,
     /// Wall-clock bound, in seconds, on the built-in DIRECT adapter's

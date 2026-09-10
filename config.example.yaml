@@ -6,8 +6,10 @@ mixed-port: 7890
 # socks-port: 7892  # SOCKS5 port (optional, mixed-port covers both)
 
 # Transparent proxy
-# Linux / macOS: tproxy-port + firewall (nftables / pf). Requires root.
-# tproxy-port: 7893      # Enable transparent proxy on this port
+# Linux: externally managed firewall (e.g. OpenClash). Requires root/CAP_NET_ADMIN.
+# redir-port: 7892      # TCP NAT REDIRECT
+# tproxy-port: 7893     # TCP/UDP TPROXY
+# tproxy-auto-route: true # Opt into legacy local TCP NAT instead (macOS default)
 # tproxy-sni: true       # Extract SNI from TLS ClientHello (default: true)
 # routing-mark: 9527     # SO_MARK for DIRECT loop avoidance on Linux
 #

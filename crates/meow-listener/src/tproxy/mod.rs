@@ -1,4 +1,6 @@
 mod firewall;
+#[cfg(target_os = "linux")]
+mod linux;
 mod orig_dest;
 
 use crate::sniffer::SnifferRuntime;
@@ -21,6 +23,14 @@ use tracing::{debug, error, info, warn};
 /// enabled). `0` explicitly disables the cap.
 pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransparentMode {
+    /// Linux TPROXY preserves the packet destination, returned by getsockname.
+    TProxy,
+    /// NAT REDIRECT requires SO_ORIGINAL_DST (or the pf NAT lookup on macOS).
+    Redir,
+}
+
 pub struct TProxyListener {
     tunnel: Tunnel,
     listen_addr: SocketAddr,
@@ -28,6 +38,8 @@ pub struct TProxyListener {
     routing_mark: Option<u32>,
     name: String,
     max_connections: usize,
+    mode: TransparentMode,
+    auto_route: bool,
 }
 
 impl TProxyListener {
@@ -62,7 +74,42 @@ impl TProxyListener {
             routing_mark,
             name,
             max_connections: DEFAULT_MAX_CONNECTIONS,
+            mode: TransparentMode::TProxy,
+            auto_route: cfg!(target_os = "macos"),
         }
+    }
+
+    pub fn with_mode(mut self, mode: TransparentMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Enable legacy local TCP NAT and own its firewall rules. Linux defaults
+    /// to external rules, as required by OpenClash and normal TPROXY setups.
+    pub fn with_auto_route(mut self, enabled: bool) -> Self {
+        self.auto_route = enabled;
+        self
+    }
+
+    fn effective_mode(&self) -> TransparentMode {
+        if self.auto_route {
+            TransparentMode::Redir
+        } else {
+            self.mode
+        }
+    }
+
+    pub async fn bind(&self) -> std::io::Result<TcpListener> {
+        if self.effective_mode() == TransparentMode::TProxy {
+            #[cfg(target_os = "linux")]
+            return linux::bind_tcp(self.listen_addr);
+            #[cfg(not(target_os = "linux"))]
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "TPROXY requires Linux; use redir or tproxy-auto-route on macOS",
+            ));
+        }
+        TcpListener::bind(self.listen_addr).await
     }
 
     pub fn with_sniffer(mut self, sniffer: Arc<SnifferRuntime>) -> Self {
@@ -82,25 +129,29 @@ impl TProxyListener {
     pub async fn run(self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Bind first so a port-0 listen can resolve to the OS-assigned port
         // before firewall rules are installed against it.
-        let listener = TcpListener::bind(self.listen_addr).await?;
+        let listener = self.bind().await?;
         self.run_on(listener).await
     }
 
     /// Serve on an already-bound socket, letting the caller resolve a
-    /// `port: 0` ephemeral listener to its OS-assigned port first. Firewall
-    /// redirect rules are installed against the socket's actual local port,
-    /// so ephemeral listeners redirect correctly.
+    /// `port: 0` ephemeral listener to its OS-assigned port first. Call `bind`
+    /// to enable IP_TRANSPARENT before binding an externally routed TPROXY socket.
     pub async fn run_on(
         self,
         listener: TcpListener,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Collect upstream proxy server IPs for firewall bypass
-        let bypass_ips = collect_proxy_server_ips(&self.tunnel);
-
         let bound_addr = listener.local_addr().unwrap_or(self.listen_addr);
-
-        // Set up firewall redirect rules (tears down on drop)
-        let _firewall = FirewallGuard::setup(bound_addr.port(), self.routing_mark, &bypass_ips)?;
+        let mode = self.effective_mode();
+        let _firewall = if self.auto_route {
+            let bypass_ips = collect_proxy_server_ips(&self.tunnel);
+            Some(FirewallGuard::setup(
+                bound_addr.port(),
+                self.routing_mark,
+                &bypass_ips,
+            )?)
+        } else {
+            None
+        };
 
         if self.max_connections == 0 {
             info!(
@@ -121,11 +172,13 @@ impl TProxyListener {
         // at startup so "tproxy is on but my browser isn't proxied" is
         // explained by the log, not a silent surprise.
         #[cfg(target_os = "macos")]
-        info!(
-            "TProxy on macOS intercepts loopback IPv4 TCP only; real outbound \
+        if self.auto_route {
+            info!(
+                "TProxy on macOS intercepts loopback IPv4 TCP only; real outbound \
              traffic needs the manual route-to detour (docs/tproxy-macos.md) — \
              for full transparent proxying use the TUN inbound (docs/tun.md)"
-        );
+            );
+        }
 
         let tunnel = self.tunnel;
         let sniffer = self.sniffer;
@@ -137,9 +190,10 @@ impl TProxyListener {
                 let sniffer = sniffer.clone();
                 let name = name.clone();
                 async move {
-                    if let Err(e) =
-                        handle_tproxy_conn(tunnel, stream, src_addr, bound_addr, sniffer, name)
-                            .await
+                    if let Err(e) = handle_tproxy_conn(
+                        tunnel, stream, src_addr, bound_addr, sniffer, name, mode,
+                    )
+                    .await
                     {
                         debug!("TProxy connection error from {src_addr}: {e}");
                     }
@@ -272,19 +326,29 @@ async fn handle_tproxy_conn(
     listen_addr: SocketAddr,
     sniffer: Option<Arc<SnifferRuntime>>,
     name: String,
+    mode: TransparentMode,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Recover the original destination address
-    let orig_dst = orig_dest::get_original_dst(&stream, listen_addr)?;
+    let orig_dst = match mode {
+        TransparentMode::Redir => orig_dest::get_original_dst(&stream, listen_addr)?,
+        TransparentMode::TProxy => stream.local_addr()?,
+    };
 
     // Skip connections where original dest equals listen addr (self-connection)
-    if orig_dst == listen_addr {
+    if orig_dst == listen_addr
+        || (mode == TransparentMode::Redir && orig_dst == stream.local_addr()?)
+        || (orig_dst.port() == listen_addr.port() && orig_dst.ip().is_loopback())
+    {
         return Err("original destination is the listen address (loop detected)".into());
     }
 
     // Build initial metadata with IP-literal host for sniffer / DNS-snoop.
     let mut metadata = Metadata {
         network: Network::Tcp,
-        conn_type: ConnType::TProxy,
+        conn_type: match mode {
+            TransparentMode::TProxy => ConnType::TProxy,
+            TransparentMode::Redir => ConnType::Redir,
+        },
         src_ip: Some(src_addr.ip()),
         src_port: src_addr.port(),
         dst_ip: Some(orig_dst.ip()),

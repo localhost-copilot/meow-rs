@@ -1,5 +1,34 @@
 use meow_config::{load_config_from_str, ListenerSpec};
 
+#[tokio::test]
+async fn openclash_transparent_ports_are_distinct_external_listeners() {
+    let config = load_config_from_str(
+        "allow-lan: true\nredir-port: 7892\ntproxy-port: 7895\ntproxy-auto-route: false\n",
+    )
+    .await
+    .unwrap();
+    assert!(!config.listeners.tproxy_auto_route);
+    for (port, kind) in [(7892, "redir"), (7895, "tproxy")] {
+        let listener = config
+            .listeners
+            .named
+            .iter()
+            .find(|l| l.port == port)
+            .unwrap();
+        assert_eq!(listener.spec.type_name(), kind);
+        assert_eq!(listener.listen, "0.0.0.0");
+    }
+    assert!(
+        load_config_from_str("redir-port: 7892\ntproxy-port: 7892\n")
+            .await
+            .is_err()
+    );
+    let disabled = load_config_from_str("redir-port: 0\ntproxy-port: 0\n")
+        .await
+        .unwrap();
+    assert!(disabled.listeners.named.is_empty());
+}
+
 // Some tests use #[tokio::test] because ShadowsocksAdapter plugin startup
 // internally requires a tokio runtime (tokio::process::Command).
 

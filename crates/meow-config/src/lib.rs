@@ -133,6 +133,10 @@ pub enum ListenerSpec {
     TProxy {
         sni: bool,
     },
+    /// TCP REDIRECT; firewall rules are owned by the caller (e.g. OpenClash).
+    Redir {
+        sni: bool,
+    },
     /// Shadowsocks encrypted-server inbound. The listener terminates SS
     /// encryption (TCP stream cipher / AEAD, UDP relay), reads the SOCKS
     /// target address, and hands the decrypted flow to the tunnel. Mirrors
@@ -187,6 +191,7 @@ impl ListenerSpec {
             Self::Http => "http",
             Self::Socks5 => "socks5",
             Self::TProxy { .. } => "tproxy",
+            Self::Redir { .. } => "redir",
             Self::Shadowsocks(_) => "shadowsocks",
         }
     }
@@ -393,6 +398,7 @@ pub struct ListenerConfig {
     pub http_port: Option<u16>,
     pub bind_address: String,
     pub tproxy_port: Option<u16>,
+    pub tproxy_auto_route: bool,
     pub tproxy_sni: bool,
     pub routing_mark: Option<u32>,
     /// All active listeners (shorthand + named), deduplicated and validated.
@@ -2011,6 +2017,9 @@ fn parse_listener_spec(
         "tproxy" => Ok(ListenerSpec::TProxy {
             sni: per_listener_sni.unwrap_or(global_tproxy_sni),
         }),
+        "redir" => Ok(ListenerSpec::Redir {
+            sni: per_listener_sni.unwrap_or(global_tproxy_sni),
+        }),
         "shadowsocks" | "ss" => Ok(ListenerSpec::Shadowsocks(SsListenerConfig {
             cipher: String::new(),
             password: String::new(),
@@ -2018,7 +2027,7 @@ fn parse_listener_spec(
             simple_obfs: None,
         })),
         other => anyhow::bail!(
-            "unknown listener type '{other}'; expected mixed, http, socks5, tproxy, or shadowsocks"
+            "unknown listener type '{other}'; expected mixed, http, socks5, redir, tproxy, or shadowsocks"
         ),
     }
 }
@@ -2099,6 +2108,15 @@ fn build_named_listeners(
     let mut used_ports: HashMap<u16, String> = HashMap::new();
     let mut used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let global_max_conns = raw.max_connections.unwrap_or(256);
+    let auto_route = raw.tproxy_auto_route.unwrap_or(cfg!(target_os = "macos"));
+    if cfg!(target_os = "linux") && auto_route && raw.routing_mark.is_none() {
+        anyhow::bail!("tproxy-auto-route requires routing-mark on Linux to prevent DIRECT loops");
+    }
+    let tproxy_bind = if auto_route {
+        "127.0.0.1"
+    } else {
+        default_bind
+    };
 
     let mut add = |name: &str,
                    spec: ListenerSpec,
@@ -2169,7 +2187,18 @@ fn build_named_listeners(
                 sni: global_tproxy_sni,
             },
             port,
-            "127.0.0.1",
+            tproxy_bind,
+            global_max_conns,
+        )?;
+    }
+    if let Some(port) = raw.redir_port.filter(|p| *p != 0) {
+        add(
+            "redir",
+            ListenerSpec::Redir {
+                sni: global_tproxy_sni,
+            },
+            port,
+            default_bind,
             global_max_conns,
         )?;
     }
@@ -2179,7 +2208,7 @@ fn build_named_listeners(
         let spec = parse_listener_spec(&raw_l.listener_type, raw_l.tproxy_sni, global_tproxy_sni)?;
         let listen_raw = raw_l.listen.as_deref().unwrap_or({
             if matches!(spec, ListenerSpec::TProxy { .. }) {
-                "127.0.0.1"
+                tproxy_bind
             } else {
                 default_bind
             }
@@ -2386,6 +2415,7 @@ async fn build_config(
         http_port: raw.port,
         bind_address: bind_addr,
         tproxy_port: raw.tproxy_port,
+        tproxy_auto_route: raw.tproxy_auto_route.unwrap_or(cfg!(target_os = "macos")),
         tproxy_sni: global_tproxy_sni,
         routing_mark: raw.routing_mark,
         named: named_listeners,
