@@ -73,6 +73,31 @@ impl Client {
         &self,
         destination: (String, u16),
     ) -> Result<(Arc<crate::session::Stream>, Arc<crate::session::Session>)> {
+        let (stream, session, synack_rx) = self.create_early_proxy_stream(destination).await?;
+        let mut guard = crate::session::stream::OpeningStreamGuard::new(Arc::clone(&stream));
+        let result = tokio::time::timeout(Duration::from_secs(30), synack_rx).await;
+        match result {
+            Ok(Ok(Ok(()))) => {
+                guard.disarm();
+                Ok((stream, session))
+            }
+            Ok(Ok(Err(error))) => Err(error),
+            Ok(Err(_)) => Err(AnyTlsError::Protocol("SYNACK channel closed".into())),
+            Err(_) => Err(AnyTlsError::Protocol("SYNACK timeout after 30s".into())),
+        }
+    }
+
+    /// Open a stream without waiting for its acknowledgement. The caller must
+    /// send initial application data and observe the returned SYNACK receiver.
+    /// UoT gateways can defer SYNACK until the first datagram has arrived.
+    pub async fn create_early_proxy_stream(
+        &self,
+        destination: (String, u16),
+    ) -> Result<(
+        Arc<crate::session::Stream>,
+        Arc<crate::session::Session>,
+        tokio::sync::oneshot::Receiver<Result<()>>,
+    )> {
         tracing::debug!(
             "[Client] create_proxy_stream: {}:{}",
             destination.0,
@@ -159,44 +184,8 @@ impl Client {
             stream_id
         );
 
-        // Wait for SYNACK with timeout (30 seconds default)
-        const DEFAULT_SYNACK_TIMEOUT: Duration = Duration::from_secs(30);
-
-        match tokio::time::timeout(DEFAULT_SYNACK_TIMEOUT, synack_rx).await {
-            Ok(Ok(Ok(()))) => {
-                guard.disarm();
-                tracing::debug!(
-                    "[Client] SYNACK received for stream {} - stream ready",
-                    stream_id
-                );
-                Ok((stream, session))
-            }
-            Ok(Ok(Err(e))) => {
-                tracing::error!("[Client] SYNACK error for stream {}: {}", stream_id, e);
-                let error_msg = e.to_string();
-                let error = AnyTlsError::Protocol(error_msg.clone());
-                stream.close_with_error(error).await;
-                Err(AnyTlsError::Protocol(error_msg))
-            }
-            Ok(Err(_)) => {
-                tracing::error!("[Client] SYNACK channel closed for stream {}", stream_id);
-                let error = AnyTlsError::Protocol("SYNACK channel closed".into());
-                stream.close_with_error(error).await;
-                Err(AnyTlsError::Protocol("SYNACK channel closed".into()))
-            }
-            Err(_) => {
-                tracing::error!(
-                    "[Client] SYNACK timeout for stream {} after {}s",
-                    stream_id,
-                    DEFAULT_SYNACK_TIMEOUT.as_secs()
-                );
-                let error_msg =
-                    format!("SYNACK timeout after {}s", DEFAULT_SYNACK_TIMEOUT.as_secs());
-                let error = AnyTlsError::Protocol(error_msg.clone());
-                stream.close_with_error(error).await;
-                Err(AnyTlsError::Protocol(error_msg))
-            }
-        }
+        guard.disarm();
+        Ok((stream, session, synack_rx))
     }
 
     /// Create a new stream by establishing or reusing a session

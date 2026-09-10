@@ -453,6 +453,14 @@ impl Session {
         );
         match frame.cmd {
             Command::Push => {
+                // Some UoT gateways send a response without a successful
+                // SYNACK. Application data also proves the stream is open.
+                if self.is_client && !frame.data.is_empty() {
+                    let streams = self.streams.read().await;
+                    if let Some(stream) = streams.get(&frame.stream_id) {
+                        stream.notify_synack(Ok(())).await;
+                    }
+                }
                 // Data frame - forward to stream
                 let data_len = frame.data.len();
                 tracing::debug!(
