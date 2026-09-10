@@ -46,6 +46,7 @@ The nested `auto-update`, `auto-update-interval`, `url`, `geodata-mode`, and
 `geodata-loader` aliases remain accepted. Corresponding top-level values take
 precedence. `geoip-matcher` does not change meow's range-index implementation.
 
+Startup downloads only databases required by the configured rules and DNS.
 Periodic refresh downloads the selected country database, ASN, and GeoSite.
 Successful downloads trigger a rebuild of rules and DNS classification,
 including GeoSite nameserver policies, GeoIP fallback filters, and policies

@@ -15,6 +15,68 @@ const MMDB_BYTES: &[u8] = b"FAKE-MMDB-CONTENTS-1";
 const ASN_BYTES: &[u8] = b"FAKE-ASN-CONTENTS-2";
 const GEOSITE_BYTES: &[u8] = b"FAKE-GEOSITE-CONTENTS-3";
 
+#[tokio::test]
+async fn cli_startup_does_not_download_unused_geodata() {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::time::{timeout, Duration};
+
+    let origin = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = origin.local_addr().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            "geox-url:
+  mmdb: http://{addr}/country.mmdb
+  asn: http://{addr}/asn.mmdb
+  geosite: http://{addr}/geosite.dat
+listeners: [{{name: geodata-startup, type: mixed, listen: 127.0.0.1, port: 0}}]
+rules: ['MATCH,DIRECT']
+"
+        ),
+    )
+    .unwrap();
+    let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_meow"))
+        .arg("-d")
+        .arg(dir.path())
+        .arg("-f")
+        .arg(&config)
+        .env("RUST_LOG", "info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut output = BufReader::new(process.stdout.take().unwrap()).lines();
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let line = output
+                .next_line()
+                .await
+                .unwrap()
+                .expect("app exited before readiness");
+            if line.contains("Mixed listener 'geodata-startup'") {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    // A local origin makes the old unconditional background fetch observable
+    // immediately; no remote DNS, TLS or network access is involved.
+    assert!(
+        timeout(Duration::from_millis(250), origin.accept())
+            .await
+            .is_err(),
+        "startup fetched a database that no rule or DNS policy references"
+    );
+    process.kill().await.unwrap();
+    process.wait().await.unwrap();
+}
+
 /// Spawn a minimal HTTP/1.1 server that responds to `GET <path>` with
 /// `routes[path]`. Returns the bound socket address.
 async fn spawn_origin(routes: HashMap<&'static str, &'static [u8]>) -> std::net::SocketAddr {
