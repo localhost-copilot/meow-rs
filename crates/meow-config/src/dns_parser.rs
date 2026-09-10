@@ -230,6 +230,61 @@ pub async fn parse_dns(
     })
 }
 
+/// Prepare a replacement for DNS policy and fallback classification after a
+/// database refresh. Upstreams and fake-IP pools remain owned by the live resolver.
+pub async fn prepare_geodata_refresh(
+    raw: &RawConfig,
+    proxies: &HashMap<smol_str::SmolStr, Arc<dyn meow_common::Proxy>>,
+    providers: &HashMap<String, Arc<RuleProvider>>,
+) -> Result<(Option<NameserverPolicy>, Option<FallbackFilter>), anyhow::Error> {
+    let Some(dns) = raw.dns.as_ref().filter(|dns| dns.enable.unwrap_or(false)) else {
+        return Ok((None, None));
+    };
+    let geo = crate::geodata::parse_geodata_config(raw)?;
+    let geosite = if crate::dns_policy_uses_geosite(raw) {
+        let path = geo
+            .geosite_path
+            .clone()
+            .unwrap_or_else(crate::default_geosite_path);
+        let allowed = crate::collect_dns_policy_geosite_categories(raw);
+        let standard = geo.loader == crate::geodata::GeoDataLoader::Standard;
+        Some(Arc::new(
+            crate::spawn_blocking_with_current_dispatcher(move || {
+                let bytes = std::fs::read(path)?;
+                meow_rules::geosite::GeositeDB::from_bytes(&bytes, (!standard).then_some(&allowed))
+                    .map_err(anyhow::Error::from)
+            })
+            .await??,
+        ))
+    } else {
+        None
+    };
+    let policy = if let Some(map) = dns.nameserver_policy.as_ref().filter(|map| !map.is_empty()) {
+        let defaults = parse_nameserver_entries(dns.default_nameserver.as_deref().unwrap_or(&[]))?;
+        let main = parse_nameserver_entries(dns.nameserver.as_deref().unwrap_or(&[]))?;
+        let bootstrap = build_policy_bootstrap_clients(&defaults, &main);
+        Some(build_nameserver_policy(map, geosite.as_ref(), &bootstrap, proxies, providers).await?)
+    } else {
+        None
+    };
+    let fallback = if dns
+        .fallback
+        .as_ref()
+        .is_some_and(|servers| !servers.is_empty())
+    {
+        let raw_filter = dns.fallback_filter.clone();
+        Some(
+            crate::spawn_blocking_with_current_dispatcher(move || {
+                build_fallback_filter_with_geo(raw_filter.as_ref(), geo.mmdb_path.as_deref(), &geo)
+            })
+            .await??,
+        )
+    } else {
+        None
+    };
+    Ok((policy, fallback))
+}
+
 async fn install_fakeip(
     resolver: &mut Resolver,
     dns: &crate::raw::RawDns,

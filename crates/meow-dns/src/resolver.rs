@@ -235,9 +235,10 @@ pub struct Resolver {
     /// Singleflight registries, one per queried family set — see
     /// [`InflightMap`].
     inflight: [InflightMap; 3],
-    policy: Option<Arc<NameserverPolicy>>,
+    policy: Arc<parking_lot::RwLock<Option<Arc<NameserverPolicy>>>>,
+    proxy_lookup: parking_lot::RwLock<Option<crate::client::ProxyLookup>>,
     direct_resolver: Option<Arc<Resolver>>,
-    fallback_filter: Option<FallbackFilter>,
+    fallback_filter: parking_lot::RwLock<Option<Arc<FallbackFilter>>>,
     /// IPv4 fake-IP pool (None when fake-ip mode is disabled or only v6 is configured).
     fakeip_v4: Option<Arc<Pool>>,
     /// IPv6 fake-IP pool.
@@ -618,21 +619,48 @@ impl Resolver {
         for client in self.main.iter().chain(self.fallback.iter().flatten()) {
             client.enable_rule_routing();
         }
-        if let Some(policy) = &self.policy {
+        if let Some(policy) = self.policy.read().as_ref() {
             policy.for_each_client(&DnsClient::enable_rule_routing);
         }
     }
 
     /// Keep named DNS outbounds synchronized with configuration and group changes.
     pub fn set_proxy_lookup(&self, lookup: crate::client::ProxyLookup) {
+        let mut current_lookup = self.proxy_lookup.write();
         for client in self.main.iter().chain(self.fallback.iter().flatten()) {
             client.set_proxy_lookup(Arc::clone(&lookup));
         }
-        if let Some(policy) = &self.policy {
+        if let Some(policy) = self.policy.read().as_ref() {
             policy.set_proxy_lookup(&lookup);
         }
+        *current_lookup = Some(Arc::clone(&lookup));
         if let Some(direct) = &self.direct_resolver {
             direct.set_proxy_lookup(lookup);
+        }
+    }
+
+    /// Publish refreshed DNS classification without replacing fake-IP pools.
+    /// Dedicated DIRECT resolvers following policy observe the same snapshot.
+    pub fn replace_geodata(
+        &self,
+        policy: Option<NameserverPolicy>,
+        fallback_filter: Option<FallbackFilter>,
+        respect_rules: bool,
+    ) {
+        let lookup = self.proxy_lookup.read();
+        if let Some(policy) = &policy {
+            if respect_rules {
+                policy.for_each_client(&DnsClient::enable_rule_routing);
+            }
+            if let Some(lookup) = lookup.as_ref() {
+                policy.set_proxy_lookup(lookup);
+            }
+        }
+        *self.policy.write() = policy.map(Arc::new);
+        *self.fallback_filter.write() = fallback_filter.map(Arc::new);
+        self.clear_cache();
+        if let Some(direct) = &self.direct_resolver {
+            direct.clear_cache();
         }
     }
 
@@ -640,7 +668,7 @@ impl Resolver {
     /// does not share caches or fake-IP allocations with the client resolver.
     pub fn set_direct_resolver(&mut self, mut resolver: Resolver, follow_policy: bool) {
         if follow_policy {
-            resolver.policy = self.policy.clone();
+            resolver.policy = Arc::clone(&self.policy);
         }
         self.direct_resolver = Some(Arc::new(resolver));
     }
@@ -696,9 +724,10 @@ impl Resolver {
             hosts,
             use_hosts,
             inflight: [DashMap::new(), DashMap::new(), DashMap::new()],
-            policy: None,
+            policy: Default::default(),
+            proxy_lookup: Default::default(),
             direct_resolver: None,
-            fallback_filter: None,
+            fallback_filter: Default::default(),
             fakeip_v4: None,
             fakeip_v6: None,
             fakeip_skipper: None,
@@ -934,9 +963,10 @@ impl Resolver {
             hosts,
             use_hosts,
             inflight: [DashMap::new(), DashMap::new(), DashMap::new()],
-            policy: policy.map(Arc::new),
+            policy: Arc::new(parking_lot::RwLock::new(policy.map(Arc::new))),
+            proxy_lookup: Default::default(),
             direct_resolver: None,
-            fallback_filter,
+            fallback_filter: parking_lot::RwLock::new(fallback_filter.map(Arc::new)),
             fakeip_v4: None,
             fakeip_v6: None,
             fakeip_skipper: None,
@@ -1445,7 +1475,9 @@ impl Resolver {
         debug!(host, ?want, "DNS lookup");
 
         // Domain-gate: skip primary entirely, go straight to fallback.
-        if let Some(ff) = &self.fallback_filter {
+        let fallback_filter = self.fallback_filter.read().clone();
+        let policy = self.policy.read().clone();
+        if let Some(ff) = &fallback_filter {
             if ff.domain_gated(host) {
                 return self.query_fallback_set(host, want).await;
             }
@@ -1458,12 +1490,11 @@ impl Resolver {
         let mut negative: Option<FamilySet> = None;
 
         // Nameserver-policy lookup.
-        if let Some(policy) = &self.policy {
+        if let Some(policy) = &policy {
             if let Some(entry) = policy.lookup(host) {
                 if let Some(set) = query_pool_set(&entry.nameservers, host, want, self.ipv6).await {
                     if set.has_positive() {
-                        if self
-                            .fallback_filter
+                        if fallback_filter
                             .as_ref()
                             .is_some_and(|ff| ff.ip_gated(&set.positive_ips()))
                         {
@@ -1482,8 +1513,7 @@ impl Resolver {
         // Global nameservers (parallel, first-positive / first-definitive-negative).
         if let Some(set) = query_pool_set(&self.main, host, want, self.ipv6).await {
             if set.has_positive() {
-                if self
-                    .fallback_filter
+                if fallback_filter
                     .as_ref()
                     .is_some_and(|ff| ff.ip_gated(&set.positive_ips()))
                 {
@@ -1572,12 +1602,14 @@ impl Resolver {
     /// Skips the `ip_gated` fallback hop — the fallback-filter's IP-CIDR /
     /// GeoIP gates only apply to address records.
     pub async fn forward_generic(&self, domain: &str, record_type: RecordType) -> Option<Message> {
-        if let Some(ff) = &self.fallback_filter {
+        let fallback_filter = self.fallback_filter.read().clone();
+        let policy = self.policy.read().clone();
+        if let Some(ff) = &fallback_filter {
             if ff.domain_gated(domain) {
                 return self.try_fallback_generic(domain, record_type).await;
             }
         }
-        if let Some(policy) = &self.policy {
+        if let Some(policy) = &policy {
             if let Some(entry) = policy.lookup(domain) {
                 if let Some(l) = query_pool_generic(&entry.nameservers, domain, record_type).await {
                     return Some(l);
@@ -3075,8 +3107,8 @@ mod tests {
             geoip_matcher: None,
         };
         let hosts = DomainTrie::new();
-        let mut resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
-        resolver.fallback_filter = Some(ff);
+        let resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
+        *resolver.fallback_filter.write() = Some(Arc::new(ff));
         // No fallback configured → None returned (primary never tried).
         let result = resolver.resolve_ip("www.google.cn").await;
         assert_eq!(result, None, "domain-gated query must skip primary");

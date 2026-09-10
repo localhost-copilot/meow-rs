@@ -85,159 +85,312 @@ pub async fn fetch_missing(
     downloaded
 }
 
-/// Startup-fetch entry point: download any geodata DB whose target file does
-/// not yet exist, then rebuild rules so the freshly-downloaded DBs take
-/// effect without a restart. Independent of `geodata.auto-update` — the goal
-/// is "if the file is missing when meow boots, fetch it so rules work on
-/// first run." Safe to spawn as a background task.
+type RuleProviders =
+    Arc<RwLock<std::collections::HashMap<String, Arc<meow_config::rule_provider::RuleProvider>>>>;
+
+/// Fetch absent databases, then refresh rule and DNS classification in memory.
 pub async fn run_on_startup(
     geo: GeoDataConfig,
     tunnel: Tunnel,
     raw_config: Arc<RwLock<RawConfig>>,
     resolver: Arc<Resolver>,
     cache_dir: PathBuf,
+    providers: RuleProviders,
 ) {
     let targets = compute_targets(&geo);
-
     let route = tunnel.route_snapshot();
-    let proxies = &route.proxies;
     let download_proxy = meow_config::internal_http::first_named_proxy(
         raw_config.read().proxies.as_deref(),
-        proxies,
+        &route.proxies,
     );
-
-    let downloaded = fetch_missing(&targets, download_proxy.as_ref()).await;
-    if downloaded.is_empty() {
+    if fetch_missing(&targets, download_proxy.as_ref())
+        .await
+        .is_empty()
+    {
         return;
     }
-
-    let raw = raw_config.read().clone();
-    let rebuild = tokio::task::spawn_blocking({
-        let resolver = Arc::clone(&resolver);
-        let cache_dir = cache_dir.clone();
-        move || {
-            meow_config::rebuild_from_raw_with_resolver(
-                &raw,
-                Some(resolver),
-                Some(cache_dir.as_path()),
-            )
-        }
-    })
-    .await;
-    match rebuild {
-        Ok(Ok((_proxies, new_rules))) => {
-            tunnel.update_rules(new_rules);
-            info!("geodata startup-fetch: rules reloaded with downloaded DBs");
-        }
-        Ok(Err(e)) => warn!(
-            "geodata startup-fetch: rule rebuild failed after download: {:#}",
-            e
-        ),
-        Err(e) => warn!(
-            "geodata startup-fetch: rule rebuild task failed after download: {}",
-            e
-        ),
+    if let Err(error) =
+        reload_databases(&tunnel, &raw_config, &resolver, &cache_dir, &providers).await
+    {
+        warn!("geodata startup-fetch: classification rebuild failed: {error:#}");
     }
 }
 
-/// Background task that periodically re-downloads the ASN and geosite DBs
-/// when `geodata.auto-update: true`. After each successful download the DB
-/// file is atomically replaced on disk, then rules are rebuilt in memory
-/// without restart. Runs forever; spawn as a background task.
-///
-/// The GeoIP MMDB is intentionally NOT refreshed here — country-code → CIDR
-/// mappings change infrequently and skipping the rebuild keeps the
-/// parser-built `CountryIndex` alive without churn. Operators who need to
-/// update GeoIP should replace `Country.mmdb` on disk and restart.
+/// Refresh all selected databases, including the country database, at the
+/// configured interval. Existing connections and fake-IP assignments survive.
 pub async fn auto_update_loop(
     geo: GeoDataConfig,
     tunnel: Tunnel,
     raw_config: Arc<RwLock<RawConfig>>,
     resolver: Arc<Resolver>,
     cache_dir: PathBuf,
+    providers: RuleProviders,
 ) {
-    let interval = std::time::Duration::from_secs(geo.auto_update_interval as u64 * 3600);
+    let interval = std::time::Duration::from_secs(u64::from(geo.auto_update_interval) * 3600);
     let mut ticker = tokio::time::interval(interval);
-    ticker.tick().await; // skip the immediate first tick
-
-    let asn_target = geo
-        .asn_path
-        .clone()
-        .unwrap_or_else(meow_config::default_asn_path);
-    let geosite_target = geo
-        .geosite_path
-        .clone()
-        .unwrap_or_else(meow_config::default_geosite_path);
-
+    ticker.tick().await;
     loop {
         ticker.tick().await;
-
-        let mut any_updated = false;
-
-        let route = tunnel.route_snapshot();
-        let proxies = &route.proxies;
-        let download_proxy = meow_config::internal_http::first_named_proxy(
-            raw_config.read().proxies.as_deref(),
-            proxies,
-        );
-
-        if let Err(e) =
-            download_and_replace(&geo.asn_url, &asn_target, download_proxy.as_ref()).await
-        {
-            warn!("geodata auto-update: ASN MMDB download failed: {:#}", e);
-        } else {
-            any_updated = true;
-        }
-
-        if let Err(e) =
-            download_and_replace(&geo.geosite_url, &geosite_target, download_proxy.as_ref()).await
-        {
-            warn!("geodata auto-update: geosite download failed: {:#}", e);
-        } else {
-            any_updated = true;
-        }
-
-        if !any_updated {
-            warn!("geodata auto-update: all downloads failed; rules not reloaded");
+        let current = match meow_config::geodata::parse_geodata_config(&raw_config.read()) {
+            Ok(current) => current,
+            Err(error) => {
+                warn!("geodata auto-update: invalid configuration: {error}");
+                continue;
+            }
+        };
+        if !current.auto_update {
             continue;
         }
-
-        let raw = raw_config.read().clone();
-        let rebuild = tokio::task::spawn_blocking({
-            let resolver = Arc::clone(&resolver);
-            let cache_dir = cache_dir.clone();
-            move || {
-                meow_config::rebuild_from_raw_with_resolver(
-                    &raw,
-                    Some(resolver),
-                    Some(cache_dir.as_path()),
-                )
+        let route = tunnel.route_snapshot();
+        let download_proxy = meow_config::internal_http::first_named_proxy(
+            raw_config.read().proxies.as_deref(),
+            &route.proxies,
+        );
+        let mut updated = false;
+        for target in compute_targets(&current) {
+            match download_and_replace(&target.url, &target.path, download_proxy.as_ref()).await {
+                Ok(()) => updated = true,
+                Err(error) => warn!("geodata auto-update: {} failed: {error:#}", target.label),
             }
-        })
-        .await;
-        match rebuild {
-            Ok(Ok((_proxies, new_rules))) => {
-                tunnel.update_rules(new_rules);
-                info!("geodata auto-update: rules reloaded with updated DBs");
-            }
-            Ok(Err(e)) => {
-                warn!(
-                    "geodata auto-update: rule rebuild failed after DB download: {:#}",
-                    e
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "geodata auto-update: rule rebuild task failed after DB download: {}",
-                    e
-                );
+        }
+        if updated {
+            if let Err(error) =
+                reload_databases(&tunnel, &raw_config, &resolver, &cache_dir, &providers).await
+            {
+                warn!("geodata auto-update: classification rebuild failed: {error:#}");
             }
         }
     }
 }
 
+async fn reload_databases(
+    tunnel: &Tunnel,
+    raw_config: &RwLock<RawConfig>,
+    resolver: &Arc<Resolver>,
+    cache_dir: &std::path::Path,
+    providers: &RuleProviders,
+) -> anyhow::Result<()> {
+    let raw = raw_config.read().clone();
+    let original = serde_yaml::to_value(&raw)?;
+    let (_, rules) = tokio::task::spawn_blocking({
+        let raw = raw.clone();
+        let resolver = Arc::clone(resolver);
+        let cache_dir = cache_dir.to_path_buf();
+        move || meow_config::rebuild_from_raw_with_resolver(&raw, Some(resolver), Some(&cache_dir))
+    })
+    .await??;
+    let route = tunnel.route_snapshot();
+    let providers = providers.read().clone();
+    let (policy, fallback) =
+        meow_config::dns_parser::prepare_geodata_refresh(&raw, &route.proxies, &providers).await?;
+    let current = raw_config.read();
+    if serde_yaml::to_value(&*current)? != original {
+        info!("geodata: configuration changed during rebuild; keeping current routing");
+        return Ok(());
+    }
+    resolver.replace_geodata(
+        policy,
+        fallback,
+        raw.dns
+            .as_ref()
+            .and_then(|dns| dns.respect_rules)
+            .unwrap_or(false),
+    );
+    tunnel.update_rules(rules);
+    info!("geodata: rules and DNS classification refreshed");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    fn geosite_fixture(domain: &str) -> Vec<u8> {
+        let mut entry = vec![
+            0x0a,
+            2,
+            b'C',
+            b'N',
+            0x12,
+            domain.len() as u8 + 4,
+            8,
+            3,
+            0x12,
+            domain.len() as u8,
+        ];
+        entry.extend_from_slice(domain.as_bytes());
+        let mut data = vec![0x0a, entry.len() as u8];
+        data.extend_from_slice(&entry);
+        data
+    }
+
+    async fn dns_fixture(last_octet: u8) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut buffer = [0; 4096];
+            loop {
+                let (size, peer) = socket.recv_from(&mut buffer).await.unwrap();
+                let mut response = buffer[..size].to_vec();
+                let mut end = 12;
+                while response[end] != 0 {
+                    end += usize::from(response[end]) + 1;
+                }
+                response.truncate(end + 5);
+                response[2..4].copy_from_slice(&[0x81, 0x80]);
+                response[6..12].copy_from_slice(&[0, 1, 0, 0, 0, 0]);
+                response.extend_from_slice(&[
+                    0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 192, 0, 2, last_octet,
+                ]);
+                socket.send_to(&response, peer).await.unwrap();
+            }
+        });
+        (addr, task)
+    }
+
+    #[tokio::test]
+    async fn database_refresh_updates_rules_dns_and_direct_policy_without_resetting_fakeip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geosite.dat");
+        std::fs::write(&path, geosite_fixture("a.test")).unwrap();
+        let (main, main_task) = dns_fixture(1).await;
+        let (policy, policy_task) = dns_fixture(2).await;
+        let config = meow_config::load_config_from_str(&format!(
+            "geodata:
+  geosite-path: '{}'
+rules: ['GEOSITE,cn,REJECT', 'MATCH,DIRECT']
+dns:
+  enable: true
+  use-system-hosts: false
+  enhanced-mode: fake-ip
+  fake-ip-filter: [a.test, b.test]
+  nameserver: ['{main}']
+  direct-nameserver: ['{main}']
+  direct-nameserver-follow-policy: true
+  nameserver-policy:
+    geosite:cn: ['{policy}#DIRECT']
+",
+            path.display()
+        ))
+        .await
+        .unwrap();
+        let resolver = config.dns.resolver;
+        let tunnel = Tunnel::new(Arc::clone(&resolver));
+        tunnel.update_routing(config.proxies, config.rules);
+        let raw = RwLock::new(config.raw);
+        let providers = Arc::new(RwLock::new(config.rule_providers));
+        let first = Some("192.0.2.1".parse().unwrap());
+        let second = Some("192.0.2.2".parse().unwrap());
+        assert_eq!(resolver.lookup_ipv4("a.test").await, second);
+        assert_eq!(resolver.lookup_ipv4("b.test").await, first);
+        let fake = resolver.lookup_ipv4("sticky.test").await.unwrap();
+        assert!(resolver.is_fake_ip(fake));
+        let selected = |host: &str| {
+            tunnel
+                .inner()
+                .resolve_proxy(&meow_common::Metadata {
+                    host: host.into(),
+                    ..Default::default()
+                })
+                .unwrap()
+                .0
+                .name()
+                .to_owned()
+        };
+        assert_eq!(selected("a.test"), "REJECT");
+        std::fs::write(&path, geosite_fixture("b.test")).unwrap();
+        reload_databases(&tunnel, &raw, &resolver, dir.path(), &providers)
+            .await
+            .unwrap();
+        assert_eq!(selected("a.test"), "DIRECT");
+        assert_eq!(selected("b.test"), "REJECT");
+        assert_eq!(resolver.lookup_ipv4("a.test").await, first);
+        assert_eq!(resolver.lookup_ipv4("b.test").await, second);
+        assert_eq!(
+            resolver
+                .direct_resolver()
+                .unwrap()
+                .lookup_ipv4("b.test")
+                .await,
+            second
+        );
+        assert_eq!(resolver.lookup_ipv4("sticky.test").await, Some(fake));
+        main_task.abort();
+        policy_task.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn periodic_refresh_downloads_the_country_database_too() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let http = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = http.local_addr().unwrap();
+        let (seen, mut received) = tokio::sync::mpsc::channel(3);
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut stream, _) = http.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                let size = stream.read(&mut request).await.unwrap();
+                let request = std::str::from_utf8(&request[..size]).unwrap();
+                let path = request.split_whitespace().nth(1).unwrap().to_owned();
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nnew",
+                    )
+                    .await
+                    .unwrap();
+                stream.shutdown().await.unwrap();
+                seen.send(path).await.unwrap();
+            }
+        });
+        let config = meow_config::load_config_from_str(&format!(
+            "geo-auto-update: true
+geo-update-interval: 1
+geox-url:
+  mmdb: http://{addr}/country
+  asn: http://{addr}/asn
+  geosite: http://{addr}/geosite
+geodata:
+  mmdb-path: '{}'
+  asn-path: '{}'
+  geosite-path: '{}'
+rules: ['MATCH,DIRECT']
+",
+            dir.path().join("country.mmdb").display(),
+            dir.path().join("asn.mmdb").display(),
+            dir.path().join("geosite.dat").display()
+        ))
+        .await
+        .unwrap();
+        let resolver = config.dns.resolver;
+        let tunnel = Tunnel::new(Arc::clone(&resolver));
+        tunnel.update_routing(config.proxies, config.rules);
+        let task = tokio::spawn(auto_update_loop(
+            config.geodata,
+            tunnel,
+            Arc::new(RwLock::new(config.raw)),
+            resolver,
+            dir.path().to_path_buf(),
+            Arc::new(RwLock::new(config.rule_providers)),
+        ));
+        tokio::task::yield_now().await;
+        assert!(received.try_recv().is_err());
+        tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+        tokio::time::resume();
+        let mut paths = Vec::new();
+        for _ in 0..3 {
+            paths.push(received.recv().await.unwrap());
+        }
+        assert_eq!(paths, ["/country", "/asn", "/geosite"]);
+        // The server notification precedes the final atomic file rename.
+        while !dir.path().join("geosite.dat").exists() {
+            tokio::task::yield_now().await;
+        }
+        for file in ["country.mmdb", "asn.mmdb", "geosite.dat"] {
+            assert_eq!(std::fs::read(dir.path().join(file)).unwrap(), b"new");
+        }
+        task.abort();
+        server.await.unwrap();
+    }
+
     use super::*;
 
     fn cfg_with_paths(
