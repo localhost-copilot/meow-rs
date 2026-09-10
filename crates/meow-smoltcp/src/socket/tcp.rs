@@ -152,7 +152,12 @@ const RTTE_K: u32 = 4;
 
 // RFC 6298 (2.4): Whenever RTO is computed, if it is less than 1 second, then the
 // RTO SHOULD be rounded up to 1 second.
+#[cfg(not(feature = "tcp-min-rto-200ms"))]
 const RTTE_MIN_RTO: u32 = 1000;
+// OpenConnect opts into the 200 ms floor also used by the reference gVisor
+// sender. The initial RTO, RTT estimation and exponential backoff are retained.
+#[cfg(feature = "tcp-min-rto-200ms")]
+const RTTE_MIN_RTO: u32 = 200;
 
 // RFC 6298 (2.5) A maximum value MAY be placed on RTO provided it is at least 60
 // seconds
@@ -523,6 +528,8 @@ pub struct Socket<'a> {
     local_rx_dup_acks: u8,
     /// If a fast retransmit needs to occur
     pending_fast_retransmit: bool,
+    /// The oldest hole already scheduled through SACK, until cumulative ACK progress.
+    last_sack_retransmit_seq: Option<TcpSeqNumber>,
 
     /// Duration for Delayed ACK. If None no ACKs will be delayed.
     ack_delay: Option<Duration>,
@@ -614,6 +621,7 @@ impl<'a> Socket<'a> {
             local_rx_last_seq: None,
             local_rx_dup_acks: 0,
             pending_fast_retransmit: false,
+            last_sack_retransmit_seq: None,
             ack_delay: Some(ACK_DELAY_DEFAULT),
             ack_delay_timer: AckDelayTimer::Idle,
             challenge_ack_timer: Instant::from_secs(0),
@@ -908,6 +916,7 @@ impl<'a> Socket<'a> {
         self.state = State::Closed;
         self.timer = Timer::new();
         self.rtte = RttEstimator::default();
+        self.last_sack_retransmit_seq = None;
         self.assembler = Assembler::new();
         self.tx_buffer.clear();
         self.rx_buffer.clear();
@@ -2116,7 +2125,9 @@ impl<'a> Socket<'a> {
                         }
                     );
 
-                    if self.local_rx_dup_acks == 3 {
+                    if self.local_rx_dup_acks == 3
+                        && self.last_sack_retransmit_seq != Some(ack_number)
+                    {
                         self.timer.set_for_fast_retransmit();
                         net_debug!("started fast retransmit");
                     }
@@ -2201,6 +2212,45 @@ impl<'a> Socket<'a> {
         if self.remote_win_len != 0 && self.timer.is_zero_window_probe() {
             tcp_trace!("stopping zero-window-probe timer");
             self.timer.set_for_idle(cx.now(), self.keep_alive);
+        }
+
+        // A data-bearing ACK can report loss without contributing to the pure
+        // duplicate-ACK counter (common with bidirectional streams). RFC 6675
+        // section 4 considers a hole lost when more than two SMSS above it are
+        // SACKed. Use this sufficient condition for the oldest hole only; this
+        // is not a full sender scoreboard. Keep every byte until cumulative ACK.
+        if self
+            .last_sack_retransmit_seq
+            .is_some_and(|seq| self.local_seq_no > seq)
+        {
+            self.last_sack_retransmit_seq = None;
+        }
+        if self.remote_has_sack
+            && self.remote_win_len != 0
+            && self.local_seq_no < self.remote_last_seq
+            && self.last_sack_retransmit_seq != Some(self.local_seq_no)
+        {
+            let smss = self
+                .remote_mss
+                .min(
+                    cx.ip_mtu()
+                        .saturating_sub(ip_repr.header_len() + TCP_HEADER_LEN),
+                )
+                .max(1);
+            let sent = self.remote_last_seq - self.local_seq_no;
+            let lost = repr.sack_ranges.iter().flatten().any(|&(left, right)| {
+                // Bound offsets to data actually sent. Serial-number ordering
+                // alone is insufficient for adversarial half-space ranges.
+                let left = left.wrapping_sub(self.local_seq_no.0 as u32) as usize;
+                let right = right.wrapping_sub(self.local_seq_no.0 as u32) as usize;
+                left > 0 && right > left && right <= sent && right - left > 2 * smss
+            });
+            if lost {
+                self.last_sack_retransmit_seq = Some(self.local_seq_no);
+                if self.local_rx_dup_acks < 3 {
+                    self.timer.set_for_fast_retransmit();
+                }
+            }
         }
 
         let payload_len = payload.len();
@@ -6931,6 +6981,121 @@ mod test {
         }));
     }
 
+    fn sack_flight(base: TcpSeqNumber) -> TestSocket {
+        let mut s = socket_established();
+        s.local_seq_no = base;
+        s.remote_last_seq = base;
+        s.remote_has_sack = true;
+        s.remote_mss = 3;
+        s.send_slice(b"aaaBBBcccDDDeeeFFF").unwrap();
+        for offset in (0..18).step_by(3) {
+            recv(&mut s, Instant::ZERO, |result| {
+                let repr = result.unwrap();
+                assert_eq!(repr.seq_number, base + offset);
+                assert_eq!(repr.payload, &b"aaaBBBcccDDDeeeFFF"[offset..offset + 3]);
+            });
+        }
+        s
+    }
+
+    #[test]
+    fn test_sack_data_ack_recovers_successive_holes_without_rto() {
+        // Also exercise a SACK block crossing the u32 wire sequence wrap.
+        for base in [LOCAL_SEQ + 1, TcpSeqNumber(-12)] {
+            let mut s = sack_flight(base);
+            let range = Some(((base + 6).0 as u32, (base + 18).0 as u32));
+            send!(s, time 50, TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(base),
+                sack_ranges: [range, None, None],
+                payload: b"x",
+                ..SEND_TEMPL
+            });
+            recv!(s, time 50, Ok(TcpRepr {
+                seq_number: base,
+                ack_number: Some(REMOTE_SEQ + 2),
+                window_len: 63,
+                payload: b"aaa",
+                ..RECV_TEMPL
+            }));
+            assert_eq!(s.send_queue(), 18, "SACK must not release application data");
+
+            // A repeated report does not flood retransmissions of the same hole.
+            send!(s, time 51, TcpRepr {
+                seq_number: REMOTE_SEQ + 2,
+                ack_number: Some(base),
+                sack_ranges: [range, None, None],
+                payload: b"y",
+                ..SEND_TEMPL
+            });
+            recv(&mut s, Instant::from_millis(51), |result| {
+                assert!(result.unwrap().payload.is_empty());
+            });
+
+            // A partial cumulative ACK reveals the next hole and permits recovery.
+            send!(s, time 52, TcpRepr {
+                seq_number: REMOTE_SEQ + 3,
+                ack_number: Some(base + 3),
+                sack_ranges: [range, None, None],
+                payload: b"z",
+                ..SEND_TEMPL
+            });
+            recv!(s, time 52, Ok(TcpRepr {
+                seq_number: base + 3,
+                ack_number: Some(REMOTE_SEQ + 4),
+                window_len: 61,
+                payload: b"BBB",
+                ..RECV_TEMPL
+            }));
+            assert_eq!(s.send_queue(), 15);
+            send!(s, time 53, TcpRepr {
+                seq_number: REMOTE_SEQ + 4,
+                ack_number: Some(base + 18),
+                ..SEND_TEMPL
+            });
+            assert_eq!(s.send_queue(), 0);
+            recv_nothing!(s, time 54);
+        }
+    }
+
+    #[test]
+    fn test_sack_rejects_unproven_loss_and_invalid_ranges() {
+        for base in [LOCAL_SEQ + 1, TcpSeqNumber(-12)] {
+            for (left, right, negotiated) in [
+                (3u32, 9u32, true),                 // Only two SMSS: reordering, not proven loss.
+                (0, 18, true),                      // No hole above the cumulative ACK.
+                (6, 6, true),                       // Empty block.
+                (12, 3, true),                      // Reversed block.
+                (6, 30, true),                      // Acknowledges data never sent.
+                (u32::MAX - 9, u32::MAX - 1, true), // Stale/DSACK block.
+                (0x7fff_ffff, 0x8000_0010, true),   // Forged half-space ordering.
+                (6, 18, false),                     // SACK was not negotiated.
+            ] {
+                let mut s = sack_flight(base);
+                s.remote_has_sack = negotiated;
+                let range = Some((
+                    (base.0 as u32).wrapping_add(left),
+                    (base.0 as u32).wrapping_add(right),
+                ));
+                send!(s, time 50, TcpRepr {
+                    seq_number: REMOTE_SEQ + 1,
+                    ack_number: Some(base),
+                    sack_ranges: [range, None, None],
+                    payload: b"x",
+                    ..SEND_TEMPL
+                });
+                recv(&mut s, Instant::from_millis(50), |result| {
+                    assert!(
+                        result.unwrap().payload.is_empty(),
+                        "unexpected retransmission for {left}..{right}"
+                    );
+                });
+                assert_eq!(s.send_queue(), 18);
+                recv_nothing!(s, time 51);
+            }
+        }
+    }
+
     #[test]
     fn test_fast_retransmit_after_triple_duplicate_ack() {
         let mut s = socket_established();
@@ -9581,6 +9746,35 @@ mod test {
             r.sample(2000);
             assert_eq!(r.retransmission_timeout(), Duration::from_millis(rto));
         }
+    }
+
+    #[test]
+    #[cfg(feature = "tcp-min-rto-200ms")]
+    fn test_low_rtt_tail_loss_recovers_with_exponential_backoff() {
+        let mut s = socket_established();
+        assert_eq!(s.rtte.retransmission_timeout(), Duration::from_secs(1));
+        s.rtte.sample(10);
+        s.send_slice(b"abc").unwrap();
+        for time in [0, 200, 600, 1400] {
+            if time != 0 {
+                recv_nothing!(s, time time - 1);
+            }
+            recv!(s, time time, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload: b"abc",
+                ..RECV_TEMPL
+            }));
+        }
+        // An ACK after retransmission cannot become a spuriously low RTT sample.
+        send!(s, time 1401, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 4),
+            ..SEND_TEMPL
+        });
+        assert_eq!(s.rtte.retransmission_timeout(), Duration::from_millis(1600));
+        assert_eq!(s.send_queue(), 0);
+        recv_nothing!(s, time 3000);
     }
 
     #[test]
