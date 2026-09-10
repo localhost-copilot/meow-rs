@@ -2,14 +2,14 @@ name: Test
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
     paths: ["crates/**", "tests/**", "Cargo.toml", "Cargo.lock", ".github/workflows/**"]
   pull_request:
     paths: ["crates/**", "tests/**", "Cargo.toml", "Cargo.lock", ".github/workflows/**"]
 
 # One active run per ref: a superseded push to the same PR/branch cancels the
 # in-flight run instead of racing it to completion. `push` is limited to
-# `main` above, so a PR branch is tested exactly once per push (via the
+# `main` and `dev` above, so other PR branches are tested once per push (via the
 # pull_request event) instead of twice.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -395,7 +395,7 @@ jobs:
       - name: Install qemu and expect
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-arm expect
+          sudo apt-get install -y --no-install-recommends qemu-system-arm expect llvm clang libclang-dev cmake perl
 
       - name: Cache OpenWrt image
         uses: actions/cache@v4

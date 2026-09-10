@@ -1,6 +1,6 @@
 # Releasing meow-rs
 
-meow-rs ships as **13 crates** published together to [crates.io](https://crates.io)
+meow-rs ships as **15 crates** published together to [crates.io](https://crates.io)
 at a single workspace version. This is the checklist for cutting a release.
 
 > [!IMPORTANT]
@@ -16,7 +16,7 @@ at a single workspace version. This is the checklist for cutting a release.
 2. Add it to the repo as the **`CARGO_REGISTRY_TOKEN`** Actions secret
    (`Settings → Secrets and variables → Actions`). The
    [`publish.yml`](../.github/workflows/publish.yml) workflow reads it.
-3. Confirm you own all 13 crate names on crates.io.
+3. Confirm you own all 15 crate names on crates.io.
 
 ## The crates & publish order
 
@@ -27,6 +27,7 @@ time (e.g. `meow-tunnel` dev-depends on `meow-config`, so config goes first):
 
 ```
 meow-common  meow-trie  meow-anytls  meow-lwip  meow-transport   (leaves)
+meow-netstack  meow-openconnect              (OpenConnect packet stack and transport)
 meow-rules   meow-dns                        (→ common, trie)
 meow-proxy                                   (→ common, dns, transport, anytls)
 meow-config                                  (→ common, trie, dns, rules, proxy)
@@ -60,7 +61,7 @@ meow-app                                     (→ everything)
    git push origin v0.15.1
    ```
    The tag push triggers [`publish.yml`](../.github/workflows/publish.yml), which
-   verifies the tag matches the workspace version and publishes all 13 crates in
+   verifies the tag matches the workspace version and publishes all 15 crates in
    order. (The workflow is idempotent — a re-run skips versions already on the
    registry, so a partial release can resume.)
 
@@ -77,7 +78,7 @@ meow-app                                     (→ everything)
   *first* publish (0.15.0). It does **not** apply to new versions of existing
   crates.
 - **New versions of existing crates:** a much higher limit, so a normal release
-  publishes all 13 crates back-to-back without throttling.
+  publishes all 15 crates back-to-back without throttling.
 
 ## Forked dependencies
 
@@ -105,6 +106,7 @@ If the workflow is unavailable, publish locally (logged in via `cargo login`):
 
 ```bash
 for c in meow-common meow-trie meow-anytls meow-lwip meow-transport \
+         meow-netstack meow-openconnect \
          meow-rules meow-dns meow-proxy \
          meow-config meow-tunnel meow-listener meow-api \
          meow-app; do

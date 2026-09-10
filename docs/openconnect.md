@@ -5,8 +5,9 @@ IPv4/IPv6 TCP/UDP 流量送入 VPN。支持 authgroup、VPN DNS 和有界重连�
 多个连接共享同一节点的会话，不创建系统 VPN 接口，
 不修改系统路由或 DNS。
 
-目前是显式启用的 `openconnect` Cargo feature，不包含在默认 `full` 或 `minimal` 中。
-CSTP 沿用 meow 的 BoringSSL TLS 层。可选 OpenSSL DTLS 后端已通过真实 ocserv
+从本 fork 的 v0.22.0 起，默认 `full` 功能集包含 `openconnect-dtls`，同时启用
+`openconnect`；`minimal` 仍需显式添加。CSTP 沿用 meow 的 BoringSSL TLS 层。
+OpenSSL DTLS 后端已通过真实 ocserv
 互通、UDP 阻断与恢复测试；构建和运行条件见下文。
 
 同配置 mihomo 对比和原始数据见 [iperf3 与回显性能报告](benchmarks/openconnect-iperf3-2026-09-09.md)。
@@ -107,7 +108,7 @@ curl -fsS --max-time 30 --proxy socks5h://127.0.0.1:18080 \
 cargo build --release -p meow-app --features openconnect-dtls
 ```
 
-此 feature 隐含 `openconnect`，不加入默认构建。macOS 使用 Homebrew OpenSSL 3，
+此 feature 隐含 `openconnect`，已加入默认 `full` 构建。macOS 使用 Homebrew OpenSSL 3，
 glibc Linux 使用系统 `libssl.so.3`；通过独立库句柄解析 OpenSSL API，glibc 使用
 deep binding，避免与 BoringSSL 的同名 C 符号混用。
 Linux musl（包括 OpenWrt）改用静态 OpenSSL 3.6.3，将两份归档的所有全局定义及其引用
@@ -161,7 +162,8 @@ bash tests/openconnect/test_linux.sh
 ## OpenWrt / musl 构建
 
 显式启用 `openconnect-dtls` 后，musl 使用与其他平台相同的 `off`／`auto`／`require`
-行为，不再因 musl 平台本身拒绝 DTLS。默认发布包仍不包含该可选 feature。
+行为，不再因 musl 平台本身拒绝 DTLS。从本 fork 的 v0.22.0 起，所有默认发布包
+均包含 OpenConnect；DTLS 运行条件仍以本节的平台说明为准。
 现有 MIPS／32 位 musl 的 BoringSSL 构建限制没有因此解除。
 
 构建主机需要 Rust 1.91+、C/C++ 工具链、CMake、Perl、libclang、LLVM 的 `llvm-nm`

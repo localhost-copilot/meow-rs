@@ -18,6 +18,8 @@ const PUBLISHABLE: &[&str] = &[
     "meow-anytls",
     "meow-lwip",
     "meow-transport",
+    "meow-netstack",
+    "meow-openconnect",
     "meow-rules",
     "meow-dns",
     "meow-proxy",
@@ -187,7 +189,7 @@ fn publishable_crates_advertise_org_urls() {
         }
         assert!(
             PUBLISHABLE.contains(&name),
-            "{name} is a workspace member that can publish but is not in the 13-crate crates.io set"
+            "{name} is a workspace member that can publish but is not in the crates.io set"
         );
         assert!(
             can_publish(pkg),

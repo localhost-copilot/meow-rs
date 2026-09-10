@@ -15,7 +15,9 @@ the same `aarch64` binary — only the opkg `Architecture:` label differs so
 that `opkg` accepts the package on your device.
 
 Feature note: release binaries use the default meow-app feature set
-(`full` + `boring-tls`), so ECH and uTLS fingerprinting are included.
+(`full`, with BoringSSL), so ECH and uTLS fingerprinting are included.
+This fork's v0.22.0 also includes OpenConnect DTLS by default, with a static,
+symbol-isolated OpenSSL backend on musl.
 
 32-bit arm / MIPS OpenWrt packages are not published: `boring-sys` does not
 build for those targets. Cross-build from source with
