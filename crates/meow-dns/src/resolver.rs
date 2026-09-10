@@ -589,6 +589,11 @@ async fn query_pool_generic(
 }
 
 impl Resolver {
+    /// Select the answer eviction policy before serving queries. Existing
+    /// entries are discarded; reverse snooping starts empty with the resolver.
+    pub fn set_cache_algorithm(&mut self, algorithm: crate::cache::CacheAlgorithm) {
+        self.cache = DnsCache::with_algorithm(4096, algorithm);
+    }
     /// Follow a mihomo-style hosts alias chain. Config parsing rejects cycles;
     /// the depth guard is a defensive backstop for programmatically-built
     /// tries passed to the public constructors.
