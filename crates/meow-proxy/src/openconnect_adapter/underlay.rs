@@ -126,7 +126,7 @@ impl NetworkOptions {
         Ok(())
     }
     fn apply(&self, socket: &Socket, ip: IpAddr) -> io::Result<()> {
-        let _ = ip;
+        let _ = (socket, ip);
         #[cfg(target_os = "android")]
         if let Some(protector) = meow_common::socket_protector() {
             use std::os::fd::AsRawFd;
