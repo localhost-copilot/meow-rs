@@ -12,10 +12,23 @@ const DEFAULT_ASN_URL: &str =
     "https://github.com/P3TERX/GeoLite.mmdb/releases/latest/download/GeoLite2-ASN.mmdb";
 const DEFAULT_GEOSITE_URL: &str =
     "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geosite.dat";
+const DEFAULT_GEOIP_URL: &str =
+    "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/geoip.dat";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GeoDataLoader {
+    Standard,
+    #[default]
+    MemConservative,
+}
 
 /// Validated `geodata:` config, produced by [`parse_geodata`].
 #[derive(Debug, Clone)]
 pub struct GeoDataConfig {
+    pub mode: bool,
+    pub loader: GeoDataLoader,
+    pub geoip_path: Option<PathBuf>,
+    pub geoip_url: String,
     pub mmdb_path: Option<PathBuf>,
     pub asn_path: Option<PathBuf>,
     pub geosite_path: Option<PathBuf>,
@@ -30,6 +43,10 @@ pub struct GeoDataConfig {
 impl Default for GeoDataConfig {
     fn default() -> Self {
         Self {
+            mode: false,
+            loader: GeoDataLoader::default(),
+            geoip_path: None,
+            geoip_url: DEFAULT_GEOIP_URL.into(),
             mmdb_path: None,
             asn_path: None,
             geosite_path: None,
@@ -42,6 +59,58 @@ impl Default for GeoDataConfig {
     }
 }
 
+impl GeoDataConfig {
+    pub fn country_database(&self) -> (PathBuf, &str) {
+        if self.mode {
+            (
+                self.geoip_path
+                    .clone()
+                    .unwrap_or_else(crate::default_geoip_dat_path),
+                &self.geoip_url,
+            )
+        } else {
+            (
+                self.mmdb_path
+                    .clone()
+                    .unwrap_or_else(crate::default_geoip_path),
+                &self.mmdb_url,
+            )
+        }
+    }
+}
+
+/// Apply mihomo's top-level fields, retaining the project's nested path aliases.
+/// Explicit top-level values take precedence over corresponding nested values.
+pub fn parse_geodata_config(raw: &crate::raw::RawConfig) -> Result<GeoDataConfig, anyhow::Error> {
+    let mut nested = raw.geodata.clone().unwrap_or_default();
+    if let Some(mode) = raw.geodata_mode {
+        nested.geodata_mode = Some(mode.into());
+    }
+    if let Some(loader) = &raw.geodata_loader {
+        nested.geodata_loader = Some(loader.clone().into());
+    }
+    if let Some(update) = raw.geo_auto_update {
+        nested.auto_update = update;
+    }
+    if let Some(interval) = raw.geo_update_interval {
+        nested.auto_update_interval = Some(interval);
+    }
+    if let Some(urls) = &raw.geox_url {
+        let target = nested.url.get_or_insert_with(Default::default);
+        for (dest, source) in [
+            (&mut target.geoip, &urls.geoip),
+            (&mut target.mmdb, &urls.mmdb),
+            (&mut target.asn, &urls.asn),
+            (&mut target.geosite, &urls.geosite),
+        ] {
+            if source.is_some() {
+                dest.clone_from(source);
+            }
+        }
+    }
+    parse_geodata(Some(&nested))
+}
+
 /// Parse and validate the raw `geodata:` block. Returns `GeoDataConfig::default()`
 /// when the block is absent.
 pub fn parse_geodata(raw: Option<&RawGeoDataConfig>) -> Result<GeoDataConfig, anyhow::Error> {
@@ -49,19 +118,28 @@ pub fn parse_geodata(raw: Option<&RawGeoDataConfig>) -> Result<GeoDataConfig, an
         return Ok(GeoDataConfig::default());
     };
 
-    // Warn on upstream-only fields (Class B per ADR-0002 §geodata-subsection.md).
-    for (name, val) in [
-        ("geodata-mode", &r.geodata_mode),
-        ("geodata-loader", &r.geodata_loader),
-        ("geoip-matcher", &r.geoip_matcher),
-    ] {
-        if val.is_some() {
-            warn!(
-                "geodata.{}: field is not supported in meow-rs and will be ignored \
-                (upstream: config.go); remove it to suppress this warning",
-                name
-            );
+    let mode = match &r.geodata_mode {
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| anyhow!("geodata-mode must be a boolean"))?,
+        None => false,
+    };
+    let loader = match r
+        .geodata_loader
+        .as_ref()
+        .and_then(serde_yaml::Value::as_str)
+    {
+        None if r.geodata_loader.is_none() => GeoDataLoader::MemConservative,
+        Some("memconservative") => GeoDataLoader::MemConservative,
+        Some("standard") => GeoDataLoader::Standard,
+        _ => {
+            return Err(anyhow!(
+                "geodata-loader must be standard or memconservative"
+            ))
         }
+    };
+    if r.geoip_matcher.is_some() {
+        warn!("geodata.geoip-matcher: meow uses its IP range index for both database formats");
     }
 
     let interval = r.auto_update_interval.unwrap_or(24);
@@ -73,6 +151,12 @@ pub fn parse_geodata(raw: Option<&RawGeoDataConfig>) -> Result<GeoDataConfig, an
 
     let urls = r.url.as_ref();
     Ok(GeoDataConfig {
+        mode,
+        loader,
+        geoip_path: r.geoip_path.as_deref().map(PathBuf::from),
+        geoip_url: urls
+            .and_then(|u| u.geoip.clone())
+            .unwrap_or_else(|| DEFAULT_GEOIP_URL.into()),
         mmdb_path: r.mmdb_path.as_deref().map(PathBuf::from),
         asn_path: r.asn_path.as_deref().map(PathBuf::from),
         geosite_path: r.geosite_path.as_deref().map(PathBuf::from),
@@ -145,6 +229,71 @@ pub async fn download_and_replace(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn top_level_geo_settings_load_country_dat_and_select_loader() {
+        let dir = tempfile::tempdir().unwrap();
+        let country = dir.path().join("geoip.dat");
+        std::fs::write(
+            &country,
+            [
+                0x0a, 14, 0x0a, 2, b'C', b'N', 0x12, 8, 0x0a, 4, 192, 0, 2, 0, 0x10, 24,
+            ],
+        )
+        .unwrap();
+        let geosite = dir.path().join("geosite.dat");
+        let mut sites = Vec::new();
+        for (code, domain) in [(b"CN", "cn.test"), (b"US", "us.test")] {
+            let mut entry = vec![0x0a, 2];
+            entry.extend_from_slice(code);
+            entry.extend_from_slice(&[
+                0x12,
+                domain.len() as u8 + 4,
+                8,
+                3,
+                0x12,
+                domain.len() as u8,
+            ]);
+            entry.extend_from_slice(domain.as_bytes());
+            sites.extend_from_slice(&[0x0a, entry.len() as u8]);
+            sites.extend_from_slice(&entry);
+        }
+        std::fs::write(&geosite, sites).unwrap();
+        let yaml = format!(
+            "geodata-mode: true
+geodata-loader: standard
+geo-auto-update: true
+geo-update-interval: 7
+geox-url: {{geoip: 'https://example.test/custom.dat'}}
+geodata:
+  geoip-path: '{}'
+  geosite-path: '{}'
+rules: ['GEOIP,CN,REJECT', 'GEOSITE,cn,REJECT', 'MATCH,DIRECT']
+",
+            country.display(),
+            geosite.display()
+        );
+        let mut raw: crate::raw::RawConfig = serde_yaml::from_str(&yaml).unwrap();
+        let parsed = super::parse_geodata_config(&raw).unwrap();
+        assert!(parsed.mode && parsed.auto_update);
+        assert_eq!(parsed.auto_update_interval, 7);
+        assert_eq!(
+            parsed.country_database(),
+            (country, "https://example.test/custom.dat")
+        );
+        let context = crate::build_parser_context_from_raw(&raw, &Default::default()).unwrap();
+        let geoip = context.geoip.unwrap();
+        assert!(geoip
+            .ranges_for("cn")
+            .v4
+            .contains(&"192.0.2.17".parse::<std::net::Ipv4Addr>().unwrap()));
+        assert_eq!(context.geosite.unwrap().category_count(), 2);
+        raw.geodata_loader = Some("memconservative".into());
+        let context = crate::build_parser_context_from_raw(&raw, &Default::default()).unwrap();
+        assert_eq!(context.geosite.unwrap().category_count(), 1);
+        raw.geo_update_interval = Some(0);
+        assert!(super::parse_geodata_config(&raw).is_err());
+    }
+
     use super::*;
     use crate::raw::{RawGeoDataConfig, RawGeoDataUrls};
 
@@ -189,6 +338,7 @@ mod tests {
     fn url_overrides_replace_defaults() {
         let raw = RawGeoDataConfig {
             url: Some(RawGeoDataUrls {
+                geoip: None,
                 mmdb: Some("https://example.com/country.mmdb".to_string()),
                 asn: None,
                 geosite: Some("https://example.com/geosite.mrs".to_string()),
@@ -229,7 +379,7 @@ mod tests {
     fn upstream_only_fields_do_not_error() {
         // geodata-mode, geodata-loader, geoip-matcher accepted without error.
         let raw = RawGeoDataConfig {
-            geodata_mode: Some(serde_yaml::Value::String("memconservative".to_string())),
+            geodata_mode: Some(serde_yaml::Value::Bool(true)),
             geodata_loader: Some(serde_yaml::Value::String("standard".to_string())),
             geoip_matcher: Some(serde_yaml::Value::String("succinct".to_string())),
             ..raw_defaults()

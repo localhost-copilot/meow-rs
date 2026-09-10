@@ -182,6 +182,8 @@ pub struct FallbackFilter {
     /// Domain patterns — match means skip primary entirely, go straight to fallback.
     pub domain: DomainTrie<()>,
     pub geoip_reader: Option<Arc<maxminddb::Reader<Vec<u8>>>>,
+    /// Country membership from a non-MMDB source, with the configured code bound.
+    pub geoip_matcher: Option<Arc<dyn Fn(IpAddr) -> bool + Send + Sync>>,
 }
 
 impl FallbackFilter {
@@ -199,6 +201,9 @@ impl FallbackFilter {
             }
         }
         if self.geoip_enabled {
+            if let Some(matcher) = &self.geoip_matcher {
+                return addrs.iter().any(|addr| !matcher(*addr));
+            }
             if let Some(reader) = &self.geoip_reader {
                 for addr in addrs {
                     if let Some(record) = reader
@@ -3067,6 +3072,7 @@ mod tests {
             ipcidr: vec![],
             domain: domain_trie,
             geoip_reader: None,
+            geoip_matcher: None,
         };
         let hosts = DomainTrie::new();
         let mut resolver = Resolver::new(vec![], vec![], DnsMode::Normal, hosts, true, true);
@@ -3087,6 +3093,7 @@ mod tests {
             ipcidr: vec![cidr],
             domain: DomainTrie::new(),
             geoip_reader: None,
+            geoip_matcher: None,
         };
         let bogon: IpAddr = "240.1.2.3".parse().unwrap();
         let clean: IpAddr = "8.8.8.8".parse().unwrap();

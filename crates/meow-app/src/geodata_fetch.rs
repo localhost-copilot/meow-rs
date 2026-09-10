@@ -28,10 +28,7 @@ pub struct GeoTarget {
 /// Resolve the three geodata target paths (mmdb / asn / geosite) from `geo`,
 /// applying the project-wide defaults when an explicit path was not set.
 pub fn compute_targets(geo: &GeoDataConfig) -> [GeoTarget; 3] {
-    let mmdb = geo
-        .mmdb_path
-        .clone()
-        .unwrap_or_else(meow_config::default_geoip_path);
+    let (country_path, country_url) = geo.country_database();
     let asn = geo
         .asn_path
         .clone()
@@ -42,9 +39,9 @@ pub fn compute_targets(geo: &GeoDataConfig) -> [GeoTarget; 3] {
         .unwrap_or_else(meow_config::default_geosite_path);
     [
         GeoTarget {
-            label: "GeoIP MMDB",
-            path: mmdb,
-            url: geo.mmdb_url.clone(),
+            label: if geo.mode { "GeoIP DAT" } else { "GeoIP MMDB" },
+            path: country_path,
+            url: country_url.into(),
         },
         GeoTarget {
             label: "ASN MMDB",

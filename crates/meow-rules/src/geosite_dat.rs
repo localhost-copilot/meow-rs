@@ -30,8 +30,6 @@ use crate::geosite::GeositeDB;
 /// Protobuf wire-type tags we care about.
 const WIRE_VARINT: u32 = 0;
 const WIRE_LEN_DELIM: u32 = 2;
-const WIRE_I64: u32 = 1;
-const WIRE_I32: u32 = 5;
 
 /// Field numbers in the V2Ray geosite schema (above).
 const FIELD_GEOSITELIST_ENTRY: u32 = 1;
@@ -48,106 +46,8 @@ const DOMAIN_TYPE_REGEX: u64 = 1;
 const DOMAIN_TYPE_DOMAIN: u64 = 2;
 const DOMAIN_TYPE_FULL: u64 = 3;
 
-#[derive(Debug, thiserror::Error)]
-pub enum DatError {
-    #[error("geosite.dat: truncated at offset {0}")]
-    Truncated(usize),
-    #[error("geosite.dat: varint overflow at offset {0}")]
-    VarintOverflow(usize),
-    #[error("geosite.dat: invalid utf-8 in field at offset {0}")]
-    InvalidUtf8(usize),
-    #[error("geosite.dat: unknown wire type {1} at offset {0}")]
-    UnknownWireType(usize, u32),
-}
-
-/// Minimal protobuf reader — only the wire-format primitives needed for the
-/// geosite schema. Holds a byte slice + cursor; all reads advance the cursor.
-struct PbReader<'a> {
-    buf: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> PbReader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
-    }
-
-    fn remaining(&self) -> usize {
-        self.buf.len().saturating_sub(self.pos)
-    }
-
-    fn is_at_end(&self) -> bool {
-        self.pos >= self.buf.len()
-    }
-
-    fn read_varint(&mut self) -> Result<u64, DatError> {
-        let start = self.pos;
-        let mut result: u64 = 0;
-        let mut shift: u32 = 0;
-        loop {
-            if self.pos >= self.buf.len() {
-                return Err(DatError::Truncated(start));
-            }
-            let b = self.buf[self.pos];
-            self.pos += 1;
-            if shift >= 64 {
-                return Err(DatError::VarintOverflow(start));
-            }
-            result |= u64::from(b & 0x7F) << shift;
-            if b & 0x80 == 0 {
-                return Ok(result);
-            }
-            shift += 7;
-        }
-    }
-
-    /// Read a wire tag — returns `(field_number, wire_type)`.
-    fn read_tag(&mut self) -> Result<(u32, u32), DatError> {
-        let tag = self.read_varint()?;
-        let field = (tag >> 3) as u32;
-        let wire = (tag & 0x7) as u32;
-        Ok((field, wire))
-    }
-
-    fn read_length_delimited(&mut self) -> Result<&'a [u8], DatError> {
-        let start = self.pos;
-        let len = self.read_varint()? as usize;
-        if self.remaining() < len {
-            return Err(DatError::Truncated(start));
-        }
-        let bytes = &self.buf[self.pos..self.pos + len];
-        self.pos += len;
-        Ok(bytes)
-    }
-
-    /// Skip a field whose tag was just consumed. Required when an unknown
-    /// field is encountered (e.g. `Domain.attribute`, field 3 wire-type 2).
-    fn skip_field(&mut self, wire: u32) -> Result<(), DatError> {
-        let start = self.pos;
-        match wire {
-            WIRE_VARINT => {
-                let _ = self.read_varint()?;
-            }
-            WIRE_LEN_DELIM => {
-                let _ = self.read_length_delimited()?;
-            }
-            WIRE_I64 => {
-                if self.remaining() < 8 {
-                    return Err(DatError::Truncated(start));
-                }
-                self.pos += 8;
-            }
-            WIRE_I32 => {
-                if self.remaining() < 4 {
-                    return Err(DatError::Truncated(start));
-                }
-                self.pos += 4;
-            }
-            other => return Err(DatError::UnknownWireType(start, other)),
-        }
-        Ok(())
-    }
-}
+use crate::geodata_wire::PbReader;
+pub use crate::geodata_wire::WireError as DatError;
 
 /// Tally of skipped Domain entries — emitted as a single warn after parsing.
 #[derive(Default)]
