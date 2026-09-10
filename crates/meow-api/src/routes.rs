@@ -637,7 +637,7 @@ async fn get_configs(State(state): State<Arc<AppState>>) -> Json<ConfigResponse>
         mixed_port: raw.mixed_port,
         socks_port: raw.socks_port,
         http_port: raw.port,
-        redir_port: 0,
+        redir_port: raw.redir_port.unwrap_or(0),
         tproxy_port: raw.tproxy_port.unwrap_or(0),
         external_controller: raw.external_controller.clone(),
         allow_lan: raw.allow_lan.unwrap_or(false),

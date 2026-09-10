@@ -68,6 +68,7 @@ else
 # Demo local-tproxy config (no real proxy — MATCH,DIRECT). Replace the proxies
 # and rules with your own; keep \`tproxy-port\` to enable transparent proxy.
 tproxy-port: 7893
+tproxy-auto-route: true
 routing-mark: 9527
 mode: rule
 log-level: info

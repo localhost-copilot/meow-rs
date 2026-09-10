@@ -1,5 +1,10 @@
 # Setting up meow as a transparent-proxy gateway
 
+> This guide describes the legacy TCP NAT setup. On Linux it now requires
+> `tproxy-auto-route: true` in addition to the configuration below. Ordinary
+> `tproxy-port` uses external TPROXY rules; OpenClash must leave auto-route off.
+> Use `redir-port` for externally managed TCP REDIRECT rules.
+
 Last updated: 2026-06-25. Tracks `meow` 0.15.x.
 Owner: ops. Audience: operators turning a Linux box (router, Raspberry Pi,
 mini-PC) into a LAN gateway that transparently proxies other devices' traffic.

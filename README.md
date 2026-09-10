@@ -83,7 +83,8 @@ Logic composition rules (AND, OR, NOT) are also supported for combining conditio
 Intercept local traffic without per-app proxy configuration.
 
 - **Windows**: Wintun TUN adapter (`tun:`). Requires an elevated process and `wintun.dll` next to `meow.exe` (included in official zips). Fake-IP DNS capture; see [docs/tun.md](docs/tun.md).
-- **Linux / macOS**: nftables redirect (Linux) or pf anchor (macOS) via `tproxy-port`
+- **Linux**: external REDIRECT (`redir-port`) and TPROXY (`tproxy-port`), including OpenClash-managed rules. `tproxy-auto-route: true` opts into the legacy local TCP NAT mode.
+- **macOS**: pf anchor via `tproxy-port` (automatic local TCP rules remain the default).
 - **Loop avoidance (tproxy)**: SO_MARK on outbound DIRECT sockets (Linux), UID-based bypass (macOS), plus IP bypass for upstream proxy servers
 - **SNI extraction**: Peek at TLS ClientHello to recover hostname for HTTPS traffic
 - **DNS snooping**: Reverse IP→domain lookup from recent DNS queries for non-TLS traffic
