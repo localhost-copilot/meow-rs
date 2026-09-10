@@ -1051,6 +1051,14 @@ async fn run(
         // the ADR-0007 size caps). Without the feature we just hint the user to
         // populate the directory manually. See issue #223.
         if let (Some(url), Some(dir)) = (&config.api.external_ui_url, &config.api.external_ui) {
+            // A named dashboard is downloaded below the shared UI root; sibling
+            // dashboards remain reachable at their own /ui/<name>/ paths.
+            let dir = config
+                .raw
+                .external_ui_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+                .map_or_else(|| dir.clone(), |name| dir.join(name));
             if !dir.is_dir() {
                 // Auto-download is gated behind `external-ui-download` AND is
                 // force-disabled on iOS/Android (mobile ships its own UI).
@@ -1059,7 +1067,8 @@ async fn run(
                     not(any(target_os = "ios", target_os = "android"))
                 ))]
                 {
-                    if let Err(e) = meow_config::external_ui::download_external_ui(url, dir).await {
+                    if let Err(e) = meow_config::external_ui::download_external_ui(url, &dir).await
+                    {
                         warn!("failed to download external-ui from {url}: {e:#}");
                     }
                 }

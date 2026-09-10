@@ -39,6 +39,14 @@ Existing OpenClash `GeoIP.dat`, `GeoSite.dat`, and `ASN.mmdb` files are reused w
 the corresponding default meow filenames are absent. No extra database copies or
 case-only symlinks are needed.
 
+## Dashboard paths
+
+`external-ui` is the directory served at `/ui/`. `external-ui-name` only selects
+the download subdirectory; it does not change that shared root. For example,
+`external-ui: /usr/share/openclash/ui` with `external-ui-name: zashboard` serves
+the dashboard at `/ui/zashboard/`, preserving OpenClash's generated links and
+access to sibling dashboards such as `/ui/metacubexd/`.
+
 ## Validation
 
 Run the isolated fixture with a Linux binary matching the Docker architecture:
