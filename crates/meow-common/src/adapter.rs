@@ -121,6 +121,13 @@ impl Default for ProxyHealth {
     }
 }
 
+/// A UDP destination and the group member that supplied its DNS answer.
+/// Pinning the member prevents concurrent selection changes from redirecting it.
+pub struct ResolvedUdpDestination {
+    pub address: std::net::SocketAddr,
+    pub outbound: Option<Arc<dyn Proxy>>,
+}
+
 #[async_trait]
 pub trait ProxyAdapter: Send + Sync {
     fn name(&self) -> &str;
@@ -129,6 +136,29 @@ pub trait ProxyAdapter: Send + Sync {
     fn support_udp(&self) -> bool;
     async fn dial_tcp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyConn>>;
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>>;
+    /// Optional resolution owned by the outbound (for example VPN DNS).
+    /// `Some` overrides pre-resolved addresses; errors must not fall back to local DNS.
+    /// `None` leaves resolution to the tunnel. Groups delegate to the selected member.
+    async fn resolve_udp_destination(
+        &self,
+        metadata: &Metadata,
+    ) -> Result<Option<ResolvedUdpDestination>> {
+        if let Some(proxy) = self.unwrap_udp_proxy(metadata) {
+            let mut result = proxy.resolve_udp_destination(metadata).await?;
+            if let Some(destination) = &mut result {
+                if destination.outbound.is_none() {
+                    destination.outbound = Some(proxy);
+                }
+            }
+            Ok(result)
+        } else {
+            Ok(None)
+        }
+    }
+    /// Choose the same member policy as UDP dialing when binding a DNS answer.
+    fn unwrap_udp_proxy(&self, metadata: &Metadata) -> Option<Arc<dyn Proxy>> {
+        self.unwrap_proxy(metadata)
+    }
     /// Run this adapter's handshake over an already-established `stream`.
     ///
     /// Used by relay groups (M1.C-2) to chain proxy hops without dialling a

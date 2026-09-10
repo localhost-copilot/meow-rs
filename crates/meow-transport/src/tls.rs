@@ -51,6 +51,29 @@ mod boring_backend;
 
 use boring_backend::{BoringInner, LazyBoringInner};
 
+/// Export connection-bound key material from a completed [`TlsLayer`] stream.
+///
+/// Call before wrapping the TLS stream in another transport. The label and
+/// optional context must match the application protocol at both endpoints.
+/// Plain streams and transports without a TLS exporter return an error.
+/// Treat the output as secret key material; never log it.
+pub fn export_keying_material(
+    stream: &mut dyn Stream,
+    output: &mut [u8],
+    label: &str,
+    context: Option<&[u8]>,
+) -> Result<()> {
+    let tls = stream
+        .as_any_mut()
+        .downcast_mut::<tokio_boring::SslStream<Box<dyn Stream>>>()
+        .ok_or_else(|| {
+            crate::TransportError::Config("stream does not expose a TLS exporter".into())
+        })?;
+    tls.ssl()
+        .export_keying_material(output, label, context)
+        .map_err(|_| crate::TransportError::Tls("TLS key export failed".into()))
+}
+
 // ─── Config structs ───────────────────────────────────────────────────────────
 
 /// Source of the ECH config list.

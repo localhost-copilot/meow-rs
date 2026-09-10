@@ -1,0 +1,249 @@
+# Diagnostic records, not the final implementation benchmark. See the companion Markdown report.
+
+# iperf-meow014-budget32
+BENCH_IPERF,off,false,1,1,921.589
+BENCH_IPERF,off,false,1,2,902.624
+BENCH_IPERF,off,false,1,3,938.458
+BENCH_IPERF,off,false,4,1,1041.408
+BENCH_IPERF,off,false,4,2,1043.264
+BENCH_IPERF,off,false,4,3,1030.137
+BENCH_IPERF,off,true,1,1,751.311
+BENCH_IPERF,off,true,1,2,771.265
+BENCH_IPERF,off,true,1,3,771.241
+BENCH_IPERF,off,true,4,1,672.384
+BENCH_IPERF,off,true,4,2,666.474
+BENCH_IPERF,off,true,4,3,669.341
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 6 0 0 6 0 0 0 0 0
+BENCH_IPERF,require,false,1,1,658.723
+BENCH_IPERF,require,false,1,2,664.679
+BENCH_IPERF,require,false,1,3,660.695
+BENCH_IPERF,require,false,4,1,663.243
+BENCH_IPERF,require,false,4,2,670.721
+BENCH_IPERF,require,false,4,3,674.637
+BENCH_IPERF,require,true,1,1,775.697
+BENCH_IPERF,require,true,1,2,770.003
+BENCH_IPERF,require,true,1,3,771.126
+BENCH_IPERF,require,true,4,1,876.526
+BENCH_IPERF,require,true,4,2,877.594
+BENCH_IPERF,require,true,4,3,877.479
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 8364985 0 0 8022262 0 0 0 0 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 290.27s
+
+# iperf-mihomo
+BENCH_IPERF,off,false,1,1,964.651
+BENCH_IPERF,off,false,1,2,1119.711
+BENCH_IPERF,off,false,1,3,1110.235
+BENCH_IPERF,off,false,4,1,1025.626
+BENCH_IPERF,off,false,4,2,1050.418
+BENCH_IPERF,off,false,4,3,1048.213
+BENCH_IPERF,off,true,1,1,748.754
+BENCH_IPERF,off,true,1,2,768.736
+BENCH_IPERF,off,true,1,3,831.386
+BENCH_IPERF,off,true,4,1,703.090
+BENCH_IPERF,off,true,4,2,711.955
+BENCH_IPERF,off,true,4,3,705.000
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 0 0 0 0 0 0 0 0 0
+BENCH_IPERF,require,false,1,1,902.266
+BENCH_IPERF,require,false,1,2,910.145
+BENCH_IPERF,require,false,1,3,906.241
+BENCH_IPERF,require,false,4,1,942.779
+BENCH_IPERF,require,false,4,2,925.838
+BENCH_IPERF,require,false,4,3,915.452
+BENCH_IPERF,require,true,1,1,981.100
+BENCH_IPERF,require,true,1,2,977.721
+BENCH_IPERF,require,true,1,3,955.658
+BENCH_IPERF,require,true,4,1,916.340
+BENCH_IPERF,require,true,4,2,897.754
+BENCH_IPERF,require,true,4,3,910.207
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 8826866 0 97 8497236 97 0 0 0 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 289.95s
+
+# iperf-final-meow-write32
+BENCH_IPERF,off,false,1,1,1454.507
+BENCH_IPERF,off,false,1,2,1437.218
+BENCH_IPERF,off,false,1,3,1403.723
+BENCH_IPERF,off,false,4,1,1092.137
+BENCH_IPERF,off,false,4,2,1103.820
+BENCH_IPERF,off,false,4,3,1109.093
+BENCH_IPERF,off,true,1,1,831.577
+BENCH_IPERF,off,true,1,2,829.740
+BENCH_IPERF,off,true,1,3,795.575
+BENCH_IPERF,off,true,4,1,781.474
+BENCH_IPERF,off,true,4,2,782.291
+BENCH_IPERF,off,true,4,3,767.873
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 6 0 0 6 0 0 0 0 0
+BENCH_IPERF,require,false,1,1,897.348
+BENCH_IPERF,require,false,1,2,901.123
+BENCH_IPERF,require,false,1,3,882.713
+BENCH_IPERF,require,false,4,1,840.969
+BENCH_IPERF,require,false,4,2,851.481
+BENCH_IPERF,require,false,4,3,824.728
+BENCH_IPERF,require,true,1,1,1098.890
+BENCH_IPERF,require,true,1,2,1120.894
+BENCH_IPERF,require,true,1,3,1116.389
+BENCH_IPERF,require,true,4,1,1023.563
+BENCH_IPERF,require,true,4,2,996.357
+BENCH_IPERF,require,true,4,3,1002.258
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 8154235 0 0 9664141 0 0 0 0 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 291.22s
+
+# echo-final-rust191
+BENCH_TCP,off,1,1,64,820.994,77.954
+BENCH_TCP,off,1,2,64,771.561,82.949
+BENCH_TCP,off,1,3,64,744.794,85.930
+BENCH_TCP,off,4,1,256,2842.198,90.071
+BENCH_TCP,off,4,2,256,3102.161,82.523
+BENCH_TCP,off,4,3,256,3016.370,84.870
+BENCH_TRANSPORT,off,direct-docker-port,server-dtls-session=false
+BENCH_SERVER_UDP,off,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,off,after,Udp: 25483 0 0 25483 0 0 0 0 0
+BENCH_TCP,require,1,1,64,17615.776,3.633
+BENCH_TCP,require,1,2,64,21665.113,2.954
+BENCH_TCP,require,1,3,64,17562.301,3.644
+BENCH_TCP,require,4,1,256,26903.599,9.515
+BENCH_TCP,require,4,2,256,18585.260,13.774
+BENCH_TCP,require,4,3,256,20691.372,12.372
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1077823 0 0 999492 0 0 0 0 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 137.16s
+
+# iperf-rust191-reno-fixed
+BENCH_IPERF,require,false,1,1,888.187
+BENCH_IPERF,require,false,4,1,867.926
+BENCH_IPERF,require,true,1,1,1137.682
+BENCH_IPERF,require,true,4,1,1027.411
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 2758046 0 0 3287232 0 0 0 0 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 48.73s
+
+# echo-rust191-reno-fixed
+BENCH_TCP,require,1,1,64,1169.472,54.726
+BENCH_TCP,require,1,2,64,1061.314,60.303
+BENCH_TCP,require,1,3,64,1086.913,58.882
+BENCH_TCP,require,4,1,256,6325.305,40.472
+BENCH_TCP,require,4,2,256,4821.178,53.099
+BENCH_TCP,require,4,3,256,5181.443,49.407
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1195057 0 0 989730 0 0 0 0 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 21.90s
+
+# iperf-rust191-quickack
+BENCH_IPERF,require,false,1,1,870.223
+BENCH_IPERF,require,false,4,1,848.648
+BENCH_IPERF,require,true,1,1,1013.061
+BENCH_IPERF,require,true,4,1,897.419
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 2903631 0 0 3025633 0 0 0 0 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 48.75s
+
+# echo-rust191-quickack
+BENCH_TCP,require,1,1,64,1250.496,51.180
+BENCH_TCP,require,1,2,64,2360.920,27.108
+BENCH_TCP,require,1,3,64,3408.541,18.776
+BENCH_TCP,require,4,1,256,8564.301,29.892
+BENCH_TCP,require,4,2,256,9627.088,26.592
+BENCH_TCP,require,4,3,256,9863.055,25.955
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1654175 0 13 983274 13 0 0 0 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 37.16s
+
+# echo-rust191-duplex
+BENCH_TCP,require,1,1,64,1085.893,58.938
+BENCH_TCP,require,1,2,64,1044.278,61.286
+BENCH_TCP,require,1,3,64,1102.759,58.036
+BENCH_TCP,require,4,1,256,7880.985,32.483
+BENCH_TCP,require,4,2,256,6267.942,40.843
+BENCH_TCP,require,4,3,256,4572.408,55.988
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1194031 0 0 987345 0 0 0 0 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 24.12s
+
+# echo-rust191-duplex-repeat
+BENCH_TCP,require,1,1,64,1106.129,57.859
+BENCH_TCP,require,1,2,64,1086.818,58.888
+BENCH_TCP,require,1,3,64,1038.006,61.657
+BENCH_TCP,require,4,1,256,4827.392,53.031
+BENCH_TCP,require,4,2,256,5344.401,47.901
+BENCH_TCP,require,4,3,256,6211.598,41.213
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1195622 0 0 986352 0 0 0 0 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 21.14s
+
+# echo-rust191-backpressure
+BENCH_TCP,require,1,1,64,1095.437,58.424
+BENCH_TCP,require,1,2,64,1082.221,59.138
+BENCH_TCP,require,1,3,64,1179.775,54.248
+BENCH_TCP,require,4,1,256,5445.917,47.008
+BENCH_TCP,require,4,2,256,4846.421,52.822
+BENCH_TCP,require,4,3,256,4632.428,55.263
+BENCH_TRANSPORT,require,direct-docker-port,server-dtls-session=true
+BENCH_SERVER_UDP,require,after,Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+BENCH_SERVER_UDP,require,after,Udp: 1195662 0 0 986450 0 0 0 0 0
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 20.42s
+
+# Host netstat -s -p udp, duplex repeat before
+udp:
+	354312388 datagrams received
+		0 with incomplete header
+		0 with bad data length field
+		0 with bad checksum
+		31364 with no checksum
+		1391923 checksummed in software
+			1366889 datagrams (22681281 bytes) over IPv4
+			25034 datagrams (36019403 bytes) over IPv6
+		879242 dropped due to no socket
+		2095380 broadcast/multicast datagrams undelivered
+		0 IPv6 multicast datagram undelivered
+		0 time multicast source filter matched
+		1181 dropped due to full socket buffers
+		0 not for hashed pcb
+		351336585 delivered
+	615290693 datagrams output
+		6437603 checksummed in software
+			5978590 datagrams (1632179110 bytes) over IPv4
+			459013 datagrams (50489722 bytes) over IPv6
+	186586 duplicate IMCP packets for port unreachable suppressed
+	692695 ICMP packets for port unreachable not suppressed
+
+# Host netstat -s -p udp, duplex repeat after
+udp:
+	356498393 datagrams received
+		0 with incomplete header
+		0 with bad data length field
+		0 with bad checksum
+		31364 with no checksum
+		1391925 checksummed in software
+			1366891 datagrams (22681318 bytes) over IPv4
+			25034 datagrams (36019403 bytes) over IPv6
+		879254 dropped due to no socket
+		2095418 broadcast/multicast datagrams undelivered
+		0 IPv6 multicast datagram undelivered
+		0 time multicast source filter matched
+		1181 dropped due to full socket buffers
+		0 not for hashed pcb
+		353522540 delivered
+	617476091 datagrams output
+		6437797 checksummed in software
+			5978669 datagrams (1632230378 bytes) over IPv4
+			459128 datagrams (50558748 bytes) over IPv6
+	186590 duplicate IMCP packets for port unreachable suppressed
+	692703 ICMP packets for port unreachable not suppressed

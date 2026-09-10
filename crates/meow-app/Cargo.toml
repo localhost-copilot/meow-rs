@@ -39,6 +39,10 @@ snell = ["meow-config/snell", "meow-proxy/snell"]
 # AnyTLS outbound (issue #377 item 1) — in the `full` bundle so release
 # binaries carry it; excluded from `minimal` (ADR-0007 binary-size caps).
 anytls = ["meow-config/anytls", "meow-proxy/anytls"]
+# CSTP dual-stack outbound: explicitly opt-in while later VPN capabilities
+# remain under development; excluded from both convenience bundles.
+openconnect = ["meow-config/openconnect", "meow-proxy/openconnect"]
+openconnect-dtls = ["openconnect", "meow-config/openconnect-dtls", "meow-proxy/openconnect-dtls"]
 hysteria2 = ["meow-config/hysteria2", "meow-proxy/hysteria2"]
 ech-tls-tunnel = [
     "ss",
@@ -110,6 +114,14 @@ windows-service = "0.8.1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
 
 [dev-dependencies]
+serde_json = { workspace = true }
+meow-openconnect = { workspace = true }
+meow-transport = { workspace = true, default-features = false, features = ["tls"] }
+tokio-util = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rcgen = "0.13"
+smoltcp = { version = "=0.12.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
 serde_yaml = { workspace = true }

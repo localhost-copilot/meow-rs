@@ -1,0 +1,376 @@
+//! Bounded AnyConnect XML form authentication over a verified TLS connection.
+//! Forms and server messages are never included in errors: they can contain secrets.
+
+use crate::{header_line, invalid, HEADER_LIMIT};
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::io;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+
+const BODY_LIMIT: usize = 65536;
+
+/// Noninteractive credentials; deliberately does not implement Debug.
+pub struct Credentials {
+    pub username: String,
+    pub password: String,
+    pub authgroup: Option<String>,
+}
+
+impl Credentials {
+    pub fn validate(&self) -> io::Result<()> {
+        if self.username.is_empty()
+            || self.password.is_empty()
+            || [&self.username, &self.password]
+                .into_iter()
+                .chain(self.authgroup.iter())
+                .any(|value| value.len() > 4096 || value.chars().any(char::is_control))
+            || self.authgroup.as_ref().is_some_and(String::is_empty)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid OpenConnect credentials",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Authenticate using XML username/password forms and optional group selection.
+/// Unsupported challenges, HTTP redirects, and repeated password
+/// prompts fail without resubmitting credentials. The caller bounds total duration.
+pub async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    authority: &str,
+    credentials: &Credentials,
+) -> io::Result<(BufReader<S>, String)> {
+    credentials.validate()?;
+    if authority.is_empty() || authority.bytes().any(|b| b <= b' ' || b == 0x7f) {
+        return Err(invalid("invalid authentication authority"));
+    }
+    let mut stream = BufReader::new(stream);
+    let mut cookies = BTreeMap::new();
+    let mut path = "/".to_owned();
+    let group = credentials
+        .authgroup
+        .as_ref()
+        .map_or_else(String::new, |group| {
+            format!("<group-select>{}</group-select>", escape(group))
+        });
+    let mut body = format!("<?xml version=\"1.0\"?><config-auth client=\"vpn\" type=\"init\"><version who=\"vpn\">v5.01</version><group-access>https://{}/</group-access>{group}</config-auth>", escape(authority));
+    let mut password_sent = false;
+    for _ in 0..6 {
+        let cookie = cookies
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        if cookie.len() > HEADER_LIMIT / 2 {
+            return Err(invalid("authentication cookie jar too large"));
+        }
+        let request = format!("POST {path} HTTP/1.1\r\nHost: {authority}\r\nUser-Agent: meow-rs\r\nX-Transcend-Version: 1\r\nContent-Type: text/xml\r\nAccept: text/xml\r\nAccept-Encoding: identity\r\nCookie: {cookie}\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+        stream.write_all(request.as_bytes()).await?;
+        stream.flush().await?;
+        let response = response(&mut stream, &mut cookies).await?;
+        let reply = form_reply(&response, credentials, &mut password_sent)?;
+        match reply {
+            Reply::Complete(token) => {
+                let cookie = cookies
+                    .remove("webvpn")
+                    .or(token)
+                    .ok_or_else(|| invalid("authentication completed without session cookie"))?;
+                validate_cookie_value(&cookie)?;
+                if cookie.is_empty() {
+                    return Err(invalid("empty authentication cookie"));
+                }
+                return Ok((stream, cookie));
+            }
+            Reply::Form { action, xml } => {
+                path = action;
+                body = xml;
+            }
+        }
+    }
+    Err(denied("OpenConnect authentication exceeded form limit"))
+}
+
+fn denied(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, message)
+}
+
+fn validate_cookie_value(value: &str) -> io::Result<()> {
+    if value.len() > 8192 || value.bytes().any(|b| b <= b' ' || b >= 0x7f || b == b';') {
+        return Err(invalid("invalid authentication cookie"));
+    }
+    Ok(())
+}
+
+async fn response<S: AsyncRead + Unpin>(
+    stream: &mut BufReader<S>,
+    cookies: &mut BTreeMap<String, String>,
+) -> io::Result<String> {
+    let mut remaining = HEADER_LIMIT;
+    let status = header_line(stream, &mut remaining).await?;
+    let mut status = status.split_whitespace();
+    if !matches!(status.next(), Some("HTTP/1.1" | "HTTP/1.0")) {
+        return Err(invalid("invalid authentication HTTP response"));
+    }
+    match status.next() {
+        Some("200") => {}
+        Some("401" | "403") => return Err(denied("OpenConnect credentials rejected")),
+        Some("500" | "502" | "503" | "504") => {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionRefused,
+                "authentication gateway temporarily unavailable",
+            ))
+        }
+        _ => {
+            return Err(invalid(
+                "unsupported authentication HTTP status or redirect",
+            ))
+        }
+    }
+    let mut length = None;
+    let mut chunked = false;
+    loop {
+        let line = header_line(stream, &mut remaining).await?;
+        if line == "\r\n" {
+            break;
+        }
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| invalid("invalid authentication HTTP header"))?;
+        let value = value.trim();
+        match name.to_ascii_lowercase().as_str() {
+            "content-length" => {
+                let size: usize = value
+                    .parse()
+                    .map_err(|_| invalid("invalid authentication body length"))?;
+                if length.replace(size).is_some() || size > BODY_LIMIT {
+                    return Err(invalid("duplicate or oversized authentication body length"));
+                }
+            }
+            "transfer-encoding" => {
+                if chunked || !value.eq_ignore_ascii_case("chunked") {
+                    return Err(invalid("unsupported authentication transfer encoding"));
+                }
+                chunked = true;
+            }
+            "content-encoding" if !value.eq_ignore_ascii_case("identity") => {
+                return Err(invalid("unsupported authentication content encoding"))
+            }
+            "set-cookie" => {
+                let (name, value) = value
+                    .split(';')
+                    .next()
+                    .unwrap_or("")
+                    .split_once('=')
+                    .ok_or_else(|| invalid("invalid authentication cookie"))?;
+                if name.is_empty()
+                    || !name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+                {
+                    return Err(invalid("invalid authentication cookie name"));
+                }
+                validate_cookie_value(value)?;
+                if cookies.len() >= 32 && !cookies.contains_key(name) {
+                    return Err(invalid("too many authentication cookies"));
+                }
+                cookies.insert(name.to_owned(), value.to_owned());
+            }
+            _ => {}
+        }
+    }
+    if chunked && length.is_some() {
+        return Err(invalid("ambiguous authentication body framing"));
+    }
+    let mut body = Vec::new();
+    if chunked {
+        let mut framing_budget = HEADER_LIMIT;
+        loop {
+            let line = header_line(stream, &mut framing_budget).await?;
+            let size = usize::from_str_radix(line.trim().split(';').next().unwrap_or(""), 16)
+                .map_err(|_| invalid("invalid authentication chunk length"))?;
+            if size == 0 {
+                while header_line(stream, &mut framing_budget).await? != "\r\n" {}
+                break;
+            }
+            if size > BODY_LIMIT - body.len() {
+                return Err(invalid("authentication body too large"));
+            }
+            let start = body.len();
+            body.resize(start + size, 0);
+            stream.read_exact(&mut body[start..]).await?;
+            let mut crlf = [0; 2];
+            stream.read_exact(&mut crlf).await?;
+            if crlf != *b"\r\n" {
+                return Err(invalid("invalid authentication chunk ending"));
+            }
+        }
+    } else {
+        let size = length
+            .ok_or_else(|| invalid("authentication response requires bounded body framing"))?;
+        body.resize(size, 0);
+        stream.read_exact(&mut body).await?;
+    }
+    String::from_utf8(body).map_err(|_| invalid("invalid authentication XML encoding"))
+}
+
+enum Reply {
+    Complete(Option<String>),
+    Form { action: String, xml: String },
+}
+
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn form_reply(xml: &str, credentials: &Credentials, password_sent: &mut bool) -> io::Result<Reply> {
+    // The protocol includes an external DOCTYPE declaration. No entity resolver
+    // is installed: parsing cannot access the network or local filesystem.
+    if xml.contains("<!ENTITY") {
+        return Err(invalid(
+            "authentication entity declarations are unsupported",
+        ));
+    }
+    let document = roxmltree::Document::parse_with_options(
+        xml,
+        roxmltree::ParsingOptions {
+            allow_dtd: true,
+            nodes_limit: 2048,
+            entity_resolver: None,
+        },
+    )
+    .map_err(|_| invalid("invalid authentication XML"))?;
+    let root = document.root_element();
+    if root.tag_name().name() != "config-auth" {
+        return Err(invalid("unsupported authentication document"));
+    }
+    if root
+        .descendants()
+        .any(|node| node.has_tag_name("host-scan") || node.has_tag_name("csd"))
+    {
+        return Err(invalid("host-scan authentication is unsupported"));
+    }
+    if root.descendants().any(|node| node.has_tag_name("error")) {
+        return Err(denied("OpenConnect authentication rejected"));
+    }
+    if root.attribute("type") == Some("complete") {
+        let token = root
+            .descendants()
+            .find(|node| node.has_tag_name("session-token"))
+            .and_then(|node| node.text())
+            .map(str::to_owned);
+        return Ok(Reply::Complete(token));
+    }
+    if root.attribute("type") != Some("auth-request") {
+        return Err(invalid("unsupported authentication response"));
+    }
+    let form = root
+        .descendants()
+        .find(|node| node.has_tag_name("form"))
+        .ok_or_else(|| invalid("authentication form missing"))?;
+    let action = form.attribute("action").unwrap_or("/");
+    if !action.starts_with('/')
+        || action.starts_with("//")
+        || action
+            .bytes()
+            .any(|b| b <= b' ' || b >= 0x7f || b == b'\\' || b == b'#')
+        || !form
+            .attribute("method")
+            .unwrap_or("post")
+            .eq_ignore_ascii_case("post")
+    {
+        return Err(invalid("unsupported authentication form action"));
+    }
+    let mut fields = BTreeMap::new();
+    for node in form
+        .descendants()
+        .filter(|node| node.has_tag_name("input") || node.has_tag_name("select"))
+    {
+        let name = node
+            .attribute("name")
+            .ok_or_else(|| invalid("authentication field name missing"))?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+            || !name.as_bytes()[0].is_ascii_alphabetic()
+        {
+            return Err(invalid("invalid authentication field name"));
+        }
+        let value = if node.has_tag_name("select") {
+            if name != "group_list" && name != "group-select" {
+                return Err(invalid("unsupported authentication selection"));
+            }
+            let options: Vec<_> = node
+                .children()
+                .filter(|node| node.has_tag_name("option"))
+                .collect();
+            let chosen = if let Some(group) = &credentials.authgroup {
+                options.iter().find(|node| {
+                    node.attribute("value") == Some(group.as_str())
+                        || node.text() == Some(group.as_str())
+                })
+            } else if options.len() == 1 {
+                options.first()
+            } else {
+                options
+                    .iter()
+                    .find(|node| node.attribute("selected").is_some())
+            }
+            .ok_or_else(|| invalid("authentication requires a valid authgroup"))?;
+            chosen
+                .attribute("value")
+                .or_else(|| chosen.text())
+                .unwrap_or("")
+                .to_owned()
+        } else {
+            match (name, node.attribute("type").unwrap_or("text")) {
+                ("username", "text") => credentials.username.clone(),
+                ("password", "password") if !*password_sent => credentials.password.clone(),
+                ("password", "password") => {
+                    return Err(denied("repeated password or MFA challenge is unsupported"))
+                }
+                (_, "hidden") => node.attribute("value").unwrap_or("").to_owned(),
+                (_, "submit") => continue,
+                _ => return Err(invalid("unsupported authentication challenge")),
+            }
+        };
+        let name = if name == "group_list" {
+            "group-select"
+        } else {
+            name
+        };
+        if fields.insert(name, value).is_some() {
+            return Err(invalid("duplicate authentication field"));
+        }
+    }
+    if fields.is_empty() {
+        return Err(invalid("empty authentication form"));
+    }
+    *password_sent |= fields.contains_key("password");
+    let mut reply = "<?xml version=\"1.0\"?><config-auth client=\"vpn\" type=\"auth-reply\"><version who=\"vpn\">v5.01</version>".to_owned();
+    for opaque in root.children().filter(|node| node.has_tag_name("opaque")) {
+        reply.push_str(&xml[opaque.range()]);
+    }
+    if let Some(group) = fields.remove("group-select") {
+        let _ = write!(reply, "<group-select>{}</group-select>", escape(&group));
+    }
+    reply.push_str("<auth>");
+    for (name, value) in fields {
+        let _ = write!(reply, "<{name}>{}</{name}>", escape(&value));
+    }
+    reply.push_str("</auth></config-auth>");
+    if reply.len() > BODY_LIMIT {
+        return Err(invalid("authentication reply too large"));
+    }
+    Ok(Reply::Form {
+        action: action.to_owned(),
+        xml: reply,
+    })
+}

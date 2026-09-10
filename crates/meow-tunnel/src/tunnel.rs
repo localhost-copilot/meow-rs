@@ -12,6 +12,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// Routing decision retained across outbound-owned UDP hostname resolution.
+pub type UdpRoute = (Arc<dyn ProxyAdapter>, SmolStr, SmolStr);
+
 /// Bundled rules + domain index + proxies map, swapped as one `Arc` on
 /// config reload. Reads on the connection-setup hot path take a single
 /// short `RwLock` read (an `Arc` refcount bump) — previously each
@@ -153,6 +156,36 @@ impl TunnelInner {
         }
     }
 
+    /// Resolve UDP hostnames through the selected outbound when it owns DNS.
+    /// Domain-only routes need no local lookup; IP rules can still request one
+    /// while routing. An outbound DNS error never falls back to the local resolver.
+    pub async fn resolve_udp_host(
+        &self,
+        metadata: &mut Metadata,
+    ) -> meow_common::Result<Option<UdpRoute>> {
+        if metadata.host.is_empty() {
+            return Ok(None);
+        }
+        let (proxy, rule, payload) = self
+            .resolve_proxy_lazy(metadata)
+            .await
+            .ok_or_else(|| meow_common::MeowError::Proxy("no matching UDP route".into()))?;
+        if let Some(destination) =
+            meow_common::with_dial_timeout(proxy.name(), proxy.resolve_udp_destination(metadata))
+                .await?
+        {
+            metadata.dst_ip = Some(destination.address.ip());
+            metadata.dst_port = destination.address.port();
+            let proxy = destination
+                .outbound
+                .map_or(proxy, |proxy| proxy as Arc<dyn ProxyAdapter>);
+            return Ok(Some((proxy, rule, payload)));
+        } else if metadata.dst_ip.is_none() {
+            metadata.dst_ip = self.resolver.resolve_ip_real(&metadata.host).await;
+        }
+        Ok(None)
+    }
+
     /// Resolve which proxy to use for the given metadata.
     ///
     /// Rule matching returns borrowed adapter/payload text, so the rule engine
@@ -213,8 +246,8 @@ impl TunnelInner {
     /// on TCP paths; may populate `metadata.dst_ip` exactly like
     /// `pre_resolve` did.
     ///
-    /// UDP paths must keep calling `pre_resolve`: their NAT session key
-    /// requires a resolved `dst_ip` regardless of what the rules demand.
+    /// UDP uses `resolve_udp_host` to finish any resolution needed by its NAT key,
+    /// giving the selected outbound's resolver precedence over local fallback.
     pub async fn resolve_proxy_lazy(
         &self,
         metadata: &mut Metadata,

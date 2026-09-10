@@ -1,0 +1,84 @@
+OpenConnect OpenWrt ARM64 validation, 2026-09-09 (local date).
+
+# OpenWrt QEMU delivered package
+Installing meow (0.21.2-openconnect1) to root...
+DISTRIB_ID='OpenWrt'
+DISTRIB_RELEASE='24.10.7'
+DISTRIB_REVISION='r29197-ab4c7d6af7'
+DISTRIB_TARGET='armsr/armv8'
+DISTRIB_ARCH='aarch64_generic'
+DISTRIB_DESCRIPTION='OpenWrt 24.10.7 r29197-ab4c7d6af7'
+DISTRIB_TAINTS=''
+TEST_PASS:off-service.vpn.test
+TEST_PASS:off-ipv6.vpn.test
+TEST_PASS:require-service.vpn.test
+TEST_PASS:require-ipv6.vpn.test
+2026-09-10T01:59:21.101604Z DEBUG meow_openconnect::dtls::session: OpenConnect switched to DTLS cipher="PSK-AES256-GCM-SHA384"
+TEST_PASS:require-fails-socket-without-fallback
+TEST_PASS:auto-service.vpn.test
+TEST_PASS:auto-ipv6.vpn.test
+2026-09-10T01:59:23.764876Z DEBUG meow_openconnect::dtls::session: OpenConnect switched to DTLS cipher="PSK-AES256-GCM-SHA384"
+2026-09-10T01:59:25.754446Z DEBUG meow_openconnect::dtls::session: OpenConnect DTLS unavailable; using CSTP data channel error=OpenSSL DTLS operation failed
+TEST_PASS:auto-fallback-recovery-same-socket
+TEST_PASS:openconnect-all-modes
+
+# musl reference gateway
+reference psk-app-id: PSK-AES128-GCM-SHA256 bidirectional datagrams passed
+reference psk-app-id: incorrect key rejected
+reference injected: PSK-CHACHA20-POLY1305 bidirectional datagrams passed
+reference injected: incorrect key rejected
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.16s
+
+# musl isolated link build
+#7 31.51     Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.68s
+#7 31.52 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+#7 33.02 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+#8 33.59     Finished `dev` profile [unoptimized + debuginfo] target(s) in 33.30s
+#8 48.67 test result: ok. 13 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 15.07s
+#9 61.37     Finished `release` profile [optimized] target(s) in 1m 01s
+
+# musl initial cross build
+#8 18.12     Finished `release` profile [optimized] target(s) in 17.90s
+#12 43.27     Finished `dev` profile [unoptimized + debuginfo] target(s) in 42.99s
+#12 43.30 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+#12 44.81 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.51s
+#13 4.775     Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.45s
+#13 4.832 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+#14 82.96     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 22s
+#14 98.09 test result: ok. 13 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 15.08s
+#15 95.62     Finished `release` profile [optimized] target(s) in 1m 35s
+
+# host regression
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.09s
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 13 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 15.14s
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 221 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 175 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.54s
+test result: ok. 73 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 1.50s
+test result: ok. 409 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 32.02s
+test result: ok. 130 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.60s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+test result: ok. 82 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+# Clippy workspace
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.75s
+
+# Clippy final build script
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.07s
+
+# Rustdoc
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.40s
