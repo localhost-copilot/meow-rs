@@ -21,6 +21,112 @@ use tokio::time::{timeout, Duration};
 const PASSWORD: &str = "test-anytls-password";
 const T: Duration = Duration::from_secs(15);
 
+#[tokio::test]
+async fn udp_request_precedes_gateway_synack() {
+    udp_gateway_response(true).await;
+}
+
+#[tokio::test]
+async fn udp_response_without_synack_opens_the_stream() {
+    udp_gateway_response(false).await;
+}
+
+async fn udp_gateway_response(send_ack: bool) {
+    use anytls_rs::protocol::{Command, Frame};
+    use anytls_rs::session::Session;
+    use anytls_rs::util::{authenticate_client, hash_password};
+    use bytes::Bytes;
+
+    timeout(T, async {
+        install_crypto_provider();
+        let (cert, key) = self_signed_cert();
+        let config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let tls = acceptor.accept(tcp).await.unwrap();
+            let (mut read, write) = tokio::io::split(tls);
+            let padding = PaddingFactory::default();
+            authenticate_client(&mut read, &hash_password(PASSWORD), &padding)
+                .await
+                .unwrap();
+            let (new_stream, mut streams) = tokio::sync::mpsc::unbounded_channel();
+            let mut session = Session::new_server(read, write, padding);
+            session.set_stream_callback(new_stream);
+            let session = Arc::new(session);
+            let mut workers = tokio::task::JoinSet::new();
+            let receiver = Arc::clone(&session);
+            workers.spawn(async move { receiver.recv_loop().await });
+            let sender = Arc::clone(&session);
+            workers.spawn(async move { sender.process_stream_data().await });
+            let stream = streams.recv().await.unwrap();
+            let mut reader = stream.reader().lock().await;
+            let mut magic = vec![0; 2 + "sp.v2.udp-over-tcp.arpa".len() + 2];
+            reader.read_exact(&mut magic).await.unwrap();
+            assert_eq!(&magic[2..magic.len() - 2], b"sp.v2.udp-over-tcp.arpa");
+            // sing-box establishes UoT before acknowledging the AnyTLS stream.
+            let mut request = [0; 8];
+            reader.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, [0, 1, 127, 0, 0, 1, 0x30, 0x39]);
+            let mut header = [0; 9];
+            reader.read_exact(&mut header).await.unwrap();
+            let len = u16::from_be_bytes([header[7], header[8]]) as usize;
+            let mut data = vec![0; len];
+            reader.read_exact(&mut data).await.unwrap();
+            if send_ack {
+                session
+                    .write_control_frame(Frame::control(Command::SynAck, stream.id()))
+                    .await
+                    .unwrap();
+            }
+            let mut reply = header.to_vec();
+            reply.extend_from_slice(&data);
+            session
+                .write_data_frame(stream.id(), Bytes::from(reply))
+                .await
+                .unwrap();
+            drop(reader);
+            finished.await.unwrap();
+            session.close().await.unwrap();
+        });
+        let adapter = AnytlsAdapter::new(
+            "uot",
+            "127.0.0.1",
+            addr.port(),
+            PASSWORD,
+            Some("localhost"),
+            true,
+            true,
+        )
+        .unwrap();
+        let destination: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let metadata = Metadata {
+            network: Network::Udp,
+            dst_ip: Some(destination.ip()),
+            dst_port: destination.port(),
+            ..Default::default()
+        };
+        let conn = adapter.dial_udp(&metadata).await.unwrap();
+        conn.write_packet(b"uot before ack", &destination)
+            .await
+            .unwrap();
+        let mut reply = [0; 64];
+        let (len, source) = conn.read_packet(&mut reply).await.unwrap();
+        assert_eq!(source, destination);
+        assert_eq!(&reply[..len], b"uot before ack");
+        done.send(()).unwrap();
+        server.await.unwrap();
+    })
+    .await
+    .expect("UoT must not wait for SYNACK before sending its request");
+}
+
 fn install_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }

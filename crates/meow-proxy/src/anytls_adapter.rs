@@ -129,23 +129,24 @@ impl ProxyAdapter for AnytlsAdapter {
     ///
     /// Mirrors mihomo `adapter/outbound/anytls.go: ListenPacketContext`: a
     /// plain proxy stream to the magic destination, then sing-box's `uot`
-    /// framing on top of it. The uot request is written lazily together with
-    /// the first datagram, exactly as upstream's `uot.NewLazyConn` does.
+    /// framing on top of it. Send the UoT request and first datagram before
+    /// waiting for a response: gateways may defer SYNACK or omit it entirely.
     async fn dial_udp(&self, metadata: &Metadata) -> Result<Box<dyn ProxyPacketConn>> {
         if !self.udp {
             return Err(MeowError::NotSupported(
                 "anytls: UDP is disabled for this proxy (set `udp: true`)".to_string(),
             ));
         }
-        let (stream, session) = self
+        let (stream, session, ack) = self
             .client
-            .create_proxy_stream((UDP_OVER_TCP_MAGIC_ADDR.to_string(), 0))
+            .create_early_proxy_stream((UDP_OVER_TCP_MAGIC_ADDR.to_string(), 0))
             .await
             .map_err(|e| MeowError::Proxy(format!("anytls udp dial: {e}")))?;
         Ok(Box::new(AnytlsPacketConn::new(
             stream,
             session,
             encode_uot_request(metadata),
+            ack,
         )))
     }
 
@@ -444,22 +445,28 @@ async fn read_uot_addr(reader: &mut StreamReader) -> Result<SocketAddr> {
 /// Each datagram becomes exactly one anytls data frame, so the framing the
 /// server reassembles never interleaves with another task's packet. Reads
 /// borrow the stream's own reader mutex; writes are serialized by the
-/// `pending_request` mutex, which doubles as the lazy-request slot.
+/// `pending_request` mutex so concurrent datagrams cannot interleave.
 struct AnytlsPacketConn {
     stream: Arc<AnytlsStream>,
     // See `AnytlsConn::_session`.
     _session: Arc<Session>,
-    /// uot request, sent coalesced with the first datagram (upstream
-    /// `uot.NewLazyConn`); `None` once it has gone out.
     pending_request: tokio::sync::Mutex<Option<Vec<u8>>>,
+    acknowledgement:
+        tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<anytls_rs::util::Result<()>>>>,
 }
 
 impl AnytlsPacketConn {
-    fn new(stream: Arc<AnytlsStream>, session: Arc<Session>, request: Vec<u8>) -> Self {
+    fn new(
+        stream: Arc<AnytlsStream>,
+        session: Arc<Session>,
+        request: Vec<u8>,
+        ack: tokio::sync::oneshot::Receiver<anytls_rs::util::Result<()>>,
+    ) -> Self {
         Self {
             stream,
             _session: session,
             pending_request: tokio::sync::Mutex::new(Some(request)),
+            acknowledgement: tokio::sync::Mutex::new(Some(ack)),
         }
     }
 
@@ -474,6 +481,23 @@ impl AnytlsPacketConn {
 #[async_trait]
 impl ProxyPacketConn for AnytlsPacketConn {
     async fn read_packet(&self, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
+        {
+            let mut pending = self.acknowledgement.lock().await;
+            if let Some(ack) = pending.as_mut() {
+                let result = tokio::time::timeout(std::time::Duration::from_secs(30), ack).await;
+                *pending = None;
+                let error = match result {
+                    Ok(Ok(Ok(()))) => None,
+                    Ok(Ok(Err(error))) => Some(error.to_string()),
+                    Ok(Err(_)) => Some("SYNACK channel closed".into()),
+                    Err(_) => Some("SYNACK timed out".into()),
+                };
+                if let Some(error) = error {
+                    self.fin_stream();
+                    return Err(MeowError::Proxy(format!("anytls UDP: {error}")));
+                }
+            }
+        }
         let mut reader = self.stream.reader().lock().await;
 
         let addr = read_uot_addr(&mut reader).await?;
@@ -503,9 +527,7 @@ impl ProxyPacketConn for AnytlsPacketConn {
 
     async fn write_packet(&self, buf: &[u8], addr: &SocketAddr) -> Result<usize> {
         let mut pending = self.pending_request.lock().await;
-
-        let request_len = pending.as_ref().map_or(0, Vec::len);
-        let mut frame = Vec::with_capacity(request_len + 21 + buf.len());
+        let mut frame = Vec::with_capacity(pending.as_ref().map_or(0, Vec::len) + 21 + buf.len());
         if let Some(request) = pending.as_ref() {
             frame.extend_from_slice(request);
         }
@@ -773,10 +795,10 @@ mod tests {
     #[tokio::test]
     async fn udp_data_and_fin_use_the_stream_writer_fifo() {
         let (session, mut peer) = test_session().await;
-        let (stream, _) = session.open_stream().await.unwrap();
+        let (stream, ack) = session.open_stream().await.unwrap();
         let id = stream.id();
         assert_eq!(wire_frame(&mut peer).await.0, Command::Syn);
-        let conn = AnytlsPacketConn::new(stream, Arc::clone(&session), vec![0xaa]);
+        let conn = AnytlsPacketConn::new(stream, Arc::clone(&session), vec![0xaa], ack);
         let destination: SocketAddr = "192.0.2.2:53".parse().unwrap();
 
         assert_eq!(conn.write_packet(b"udp", &destination).await.unwrap(), 3);
@@ -791,14 +813,14 @@ mod tests {
     #[tokio::test]
     async fn udp_cancelled_admission_preserves_lazy_request_and_close_order() {
         let (session, mut peer) = test_session().await;
-        let (stream, _) = session.open_stream().await.unwrap();
+        let (stream, ack) = session.open_stream().await.unwrap();
         let id = stream.id();
         assert_eq!(wire_frame(&mut peer).await.0, Command::Syn);
         // Fill the session budget while the first frame blocks on the wire.
         for _ in 0..64 {
             stream.send_data(Bytes::from(vec![42; 512])).await.unwrap();
         }
-        let conn = AnytlsPacketConn::new(stream, Arc::clone(&session), vec![0xaa]);
+        let conn = AnytlsPacketConn::new(stream, Arc::clone(&session), vec![0xaa], ack);
         let destination: SocketAddr = "192.0.2.2:53".parse().unwrap();
         let mut write = Box::pin(conn.write_packet(b"cancelled", &destination));
         assert!(futures::poll!(&mut write).is_pending());
