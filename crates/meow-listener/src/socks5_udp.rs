@@ -399,6 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn quic_sni_routes_the_association_and_preserves_later_datagrams_and_reply_addresses() {
+        let mut stage = "configuration";
         tokio::time::timeout(Duration::from_secs(5), async {
             let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
             let port = upstream.local_addr().unwrap().port();
@@ -406,14 +407,17 @@ mod tests {
             let tunnel = Tunnel::new(cfg.dns.resolver);
             tunnel.set_sniffer(cfg.sniffer);
             tunnel.update_routing(cfg.proxies, cfg.rules);
+            stage = "TCP control connection";
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let mut control = TcpStream::connect(addr).await.unwrap();
             let (server, peer) = listener.accept().await.unwrap();
             let task = tokio::spawn(async move { crate::socks5::handle_socks5(&tunnel, server, peer, None, None, "socks", addr.port()).await; });
+            stage = "SOCKS5 negotiation";
             control.write_all(&[5, 1, 0]).await.unwrap();
             let mut greeting = [0u8; 2]; control.read_exact(&mut greeting).await.unwrap();
             assert_eq!(greeting, [5, 0]);
+            stage = "UDP association reply";
             control.write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
             let mut bound = [0u8; 10]; control.read_exact(&mut bound).await.unwrap();
             let relay = SocketAddr::from(([bound[4], bound[5], bound[6], bound[7]], u16::from_be_bytes([bound[8], bound[9]])));
@@ -422,19 +426,24 @@ mod tests {
             let hex: String = include_str!("../../meow-tunnel/tests/fixtures/quic/rfc9001-client-initial.hex").split_whitespace().collect();
             let initial: Vec<u8> = hex.as_bytes().as_chunks::<2>().0.iter().map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap()).collect();
             for payload in [initial.as_slice(), b"\x40short-header-application-data"] {
+                stage = "sending a client datagram";
                 let mut request = SmallVec::new(); encode_udp_header(&mut request, &original); request.extend_from_slice(payload);
                 client.send_to(&request, relay).await.unwrap();
                 let mut received = [0u8; 2048];
+                stage = if payload == initial.as_slice() { "forwarding the QUIC Initial" } else { "forwarding the later datagram" };
                 let (len, peer) = upstream.recv_from(&mut received).await.unwrap();
                 assert_eq!(&received[..len], payload);
+                stage = "sending the upstream reply";
                 upstream.send_to(b"reply", peer).await.unwrap();
+                stage = "receiving the SOCKS5 UDP reply";
                 let (len, _) = client.recv_from(&mut received).await.unwrap();
                 let (ip, _, reply_port, offset) = parse_udp_request(&received[..len]).unwrap();
                 assert_eq!(ip, Some(original.ip())); assert_eq!(reply_port, port);
                 assert_eq!(&received[offset..len], b"reply");
             }
+            stage = "closing the control connection";
             drop(control); task.await.unwrap();
-        }).await.expect("QUIC must choose the SNI rule before forwarding the first packet");
+        }).await.unwrap_or_else(|_| panic!("QUIC association timed out during {stage}"));
     }
 
     #[tokio::test]
