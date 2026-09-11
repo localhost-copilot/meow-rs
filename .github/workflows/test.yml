@@ -40,9 +40,11 @@ jobs:
 
       # Also stands in for the per-crate `cargo check --all-features` legs
       # that used to run in the test job (transport G7, VLESS G3): clippy is
-      # a strict superset of check.
+      # a strict superset of check. meow-smoltcp is excluded because its
+      # compile-time capacity features are intentionally mutually exclusive;
+      # the selected OpenConnect feature matrix is covered by the test job.
       - name: Clippy (all features)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --exclude meow-smoltcp -- -D warnings
 
       - name: Clippy (no default features)
         run: cargo clippy --all-targets --no-default-features -- -D warnings
@@ -294,7 +296,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Clippy (all features)
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --exclude meow-smoltcp -- -D warnings
 
       - name: Clippy (no default features)
         run: cargo clippy --all-targets --no-default-features -- -D warnings
