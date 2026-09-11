@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use meow_trie::DomainTrie;
+use meow_trie::{CompactDomainTrie, DomainTrie};
 use tracing::warn;
 
 use crate::mrs_parser::{
@@ -33,7 +33,7 @@ pub enum GeositeError {
 
 /// Parsed geosite database. Cheap to share via `Arc`.
 pub struct GeositeDB {
-    categories: HashMap<String, DomainTrie<()>>,
+    categories: HashMap<String, CompactDomainTrie>,
     counts: HashMap<String, usize>,
     /// Regex patterns are compiled at load time so matching never allocates.
     regex_compiled: HashMap<String, Vec<regex::Regex>>,
@@ -63,7 +63,7 @@ impl GeositeDB {
     pub fn insert(&mut self, cat: &str, domain: &str) {
         let cat_key = cat.to_ascii_lowercase();
         let trie = self.categories.entry(cat_key.clone()).or_default();
-        if trie.insert(&domain.to_ascii_lowercase(), ()) {
+        if trie.insert(&domain.to_ascii_lowercase()) {
             *self.counts.entry(cat_key).or_insert(0) += 1;
         }
     }
@@ -87,7 +87,7 @@ impl GeositeDB {
         };
 
         if let Some(trie) = self.categories.get(cat) {
-            if trie.search(domain).is_some() {
+            if trie.search(domain) {
                 return true;
             }
         }
@@ -159,7 +159,7 @@ impl GeositeDB {
     /// case-fold scan that [`Self::lookup`] pays.
     pub fn lookup_resolved(&self, key: &str, domain: &str) -> bool {
         if let Some(trie) = self.categories.get(key) {
-            if trie.search(domain).is_some() {
+            if trie.search(domain) {
                 return true;
             }
         }
@@ -188,14 +188,30 @@ impl GeositeDB {
     }
 
     pub fn from_parts(
-        mut categories: HashMap<String, DomainTrie<()>>,
+        categories: HashMap<String, DomainTrie<()>>,
         counts: HashMap<String, usize>,
         regex_patterns: HashMap<String, Vec<String>>,
         keywords: HashMap<String, Vec<String>>,
     ) -> Self {
-        for trie in categories.values_mut() {
-            trie.seal();
-        }
+        let categories = categories
+            .into_iter()
+            .map(|(name, trie)| {
+                let patterns = trie.to_patterns();
+                (
+                    name,
+                    CompactDomainTrie::from_patterns(patterns.iter().map(String::as_str)),
+                )
+            })
+            .collect();
+        Self::from_compact_parts(categories, counts, regex_patterns, keywords)
+    }
+
+    pub(crate) fn from_compact_parts(
+        categories: HashMap<String, CompactDomainTrie>,
+        counts: HashMap<String, usize>,
+        regex_patterns: HashMap<String, Vec<String>>,
+        keywords: HashMap<String, Vec<String>>,
+    ) -> Self {
         let regex_compiled: HashMap<String, Vec<regex::Regex>> = regex_patterns
             .into_iter()
             .map(|(category, patterns)| {
@@ -236,20 +252,13 @@ impl GeositeDB {
                 let decompressed = decompress_payload(rest)?;
                 let payload = parse_geosite_payload(&decompressed, allowed)?;
 
-                let mut categories: HashMap<String, DomainTrie<()>> =
+                let mut categories: HashMap<String, CompactDomainTrie> =
                     HashMap::with_capacity(payload.categories.len());
                 let mut counts: HashMap<String, usize> =
                     HashMap::with_capacity(payload.categories.len());
                 for (name, domains) in payload.categories {
-                    let mut trie = DomainTrie::new();
-                    let mut inserted = 0usize;
-                    for d in domains {
-                        if trie.insert(&d, ()) {
-                            inserted += 1;
-                        }
-                    }
-                    trie.seal();
-                    counts.insert(name.clone(), inserted);
+                    let trie = CompactDomainTrie::from_patterns(domains.iter().map(String::as_str));
+                    counts.insert(name.clone(), trie.len());
                     categories.insert(name, trie);
                 }
                 Ok(Self {

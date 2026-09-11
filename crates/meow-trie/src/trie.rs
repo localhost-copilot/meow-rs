@@ -442,6 +442,77 @@ impl<T: Clone + 'static> DomainTrie<T> {
     }
 }
 
+impl DomainTrie<()> {
+    /// Return the stored domain patterns. This is primarily a bridge for
+    /// specialized compact representations; it is not used by matching.
+    pub fn to_patterns(&self) -> Vec<String> {
+        let mut labels = Vec::new();
+        let mut patterns = Vec::new();
+        match &self.state {
+            TrieState::Building(root) => collect_build_patterns(root, &mut labels, &mut patterns),
+            TrieState::Sealed(root) => collect_sealed_patterns(root, &mut labels, &mut patterns),
+        }
+        patterns
+    }
+}
+
+fn collect_pattern_forms(
+    exact: bool,
+    star: bool,
+    dot: bool,
+    labels: &[String],
+    out: &mut Vec<String>,
+) {
+    if labels.is_empty() {
+        return;
+    }
+    let name = labels
+        .iter()
+        .rev()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(".");
+    if exact {
+        out.push(name.clone());
+    }
+    if star {
+        out.push(format!("*.{name}"));
+    }
+    if dot {
+        out.push(format!(".{name}"));
+    }
+}
+
+fn collect_build_patterns(node: &BuildNode<()>, labels: &mut Vec<String>, out: &mut Vec<String>) {
+    collect_pattern_forms(
+        node.exact_value.is_some(),
+        node.star_value.is_some(),
+        node.dot_value.is_some(),
+        labels,
+        out,
+    );
+    for (label, child) in &node.children {
+        labels.push(label.to_string());
+        collect_build_patterns(child, labels, out);
+        labels.pop();
+    }
+}
+
+fn collect_sealed_patterns(node: &SealedNode<()>, labels: &mut Vec<String>, out: &mut Vec<String>) {
+    collect_pattern_forms(
+        node.exact_value.is_some(),
+        node.star_value.is_some(),
+        node.dot_value.is_some(),
+        labels,
+        out,
+    );
+    for (label, child) in &node.children {
+        labels.push(label.to_string());
+        collect_sealed_patterns(child, labels, out);
+        labels.pop();
+    }
+}
+
 fn fold_min<'a, T: Ord>(best: &mut Option<&'a T>, candidate: Option<&'a T>) {
     if let Some(candidate) = candidate {
         match best {
