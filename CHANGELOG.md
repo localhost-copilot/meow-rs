@@ -6,6 +6,22 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Release notes are mirrored onto the GitHub Release for each tag; this file is
 the canonical, in-repo source a release is cut from.
 
+## [0.23.2] - 2026-09-10
+
+### Changed
+
+- Compact immutable GeoSite and Domain rule-provider indexes to reduce
+  resident memory while preserving mihomo wildcard matching behavior.
+- Avoid duplicate rule-provider entry and regex source allocations; inline
+  short rule-set metadata.
+
+### Validation
+
+- ARM64 OpenWrt validation measured approximately 30 MiB RSS with the full
+  configuration; both configured AnyConnect peers passed HTTPS health checks.
+- Rule, GeoSite, and provider stress tests passed on the release branch.
+- No node credentials or provider payloads are included in the release.
+
 ## [Unreleased]
 
 ## [0.23.1] - 2026-09-10
