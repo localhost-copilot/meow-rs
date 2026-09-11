@@ -267,6 +267,9 @@ impl DomainRuleSet {
         // Rule providers are immutable after loading. Build directly into the
         // flat trie representation so every provider avoids retaining one
         // HashMap/boxed-child allocation per domain label.
+        // Keep only borrowed pattern views while the builder runs. The input
+        // entries are owned by the parser and outlive this call, so cloning
+        // every provider string here would needlessly double startup memory.
         let mut patterns = Vec::with_capacity(entries.len());
         let mut count = 0;
         for entry in entries {
@@ -290,19 +293,19 @@ impl DomainRuleSet {
                 true
             };
             if valid {
-                patterns.push(entry.to_owned());
+                patterns.push(entry);
                 // Domain rule providers historically add the bare host for
                 // `+.domain`; keep that apex match while the compact trie
                 // stores the wildcard forms in one node.
                 if let Some(rest) = entry.strip_prefix("+.") {
-                    patterns.push(rest.to_owned());
+                    patterns.push(rest);
                 }
                 count += 1;
             } else {
                 warn!("rule-set (domain): skipping invalid entry '{}'", entry);
             }
         }
-        let trie = CompactDomainTrie::from_patterns(patterns.iter().map(String::as_str));
+        let trie = CompactDomainTrie::from_patterns(patterns);
         Self { trie, count }
     }
 }
