@@ -5,7 +5,7 @@
 //! `RULE-SET,<name>,<adapter>` entry. Three behaviors are supported:
 //!
 //! - `Domain` — payload is a list of domains / `+.domain` wildcards, stored
-//!   in a `DomainTrie` for O(log N) lookup.
+//!   in a compact suffix trie for O(log N) lookup.
 //! - `IpCidr` — payload is a list of IPv4/IPv6 CIDRs.
 //! - `Classical` — payload is a list of full Clash rule strings; each line
 //!   is parsed as a normal rule (adapter ignored).
@@ -16,10 +16,10 @@ use std::str::FromStr;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use iprange::IpRange;
 use meow_common::{Metadata, Rule, RuleMatchHelper};
-use meow_trie::DomainTrie;
+use meow_trie::CompactDomainTrie;
 use tracing::warn;
 
-use crate::parser::{parse_rule, ParserContext};
+use crate::parser::{ParserContext, parse_rule};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuleSetBehavior {
@@ -135,8 +135,8 @@ pub fn build_rule_set_from_mrs_with_behavior(
     expected: Option<RuleSetBehavior>,
 ) -> Result<Box<dyn RuleSet>, String> {
     use crate::mrs_parser::{
-        decompress_payload, parse_header, parse_upstream_ruleset_mrs, TYPE_CLASSICAL, TYPE_DOMAIN,
-        TYPE_IPCIDR, ZSTD_MAGIC,
+        TYPE_CLASSICAL, TYPE_DOMAIN, TYPE_IPCIDR, ZSTD_MAGIC, decompress_payload, parse_header,
+        parse_upstream_ruleset_mrs,
     };
     if bytes.len() >= 4 && bytes[..4] == ZSTD_MAGIC {
         let payload = parse_upstream_ruleset_mrs(bytes).map_err(|e| e.to_string())?;
@@ -258,35 +258,51 @@ fn parse_ipcidr_payload(decompressed: &[u8]) -> Result<Vec<String>, String> {
 // ---------------------------------------------------------------------------
 
 pub struct DomainRuleSet {
-    trie: DomainTrie<()>,
+    trie: CompactDomainTrie,
     count: usize,
 }
 
 impl DomainRuleSet {
     pub fn from_entries(entries: &[String]) -> Self {
-        let mut trie: DomainTrie<()> = DomainTrie::new();
+        // Rule providers are immutable after loading. Build directly into the
+        // flat trie representation so every provider avoids retaining one
+        // HashMap/boxed-child allocation per domain label.
+        let mut patterns = Vec::with_capacity(entries.len());
         let mut count = 0;
         for entry in entries {
             let entry = entry.trim();
             if entry.is_empty() {
                 continue;
             }
-            let inserted = trie.insert(entry, ());
-            // `+.foo.com` should match both the bare `foo.com` and any
-            // subdomain (upstream mihomo semantics). `DomainTrie::insert`
-            // only registers the wildcards; also insert the bare host.
-            let bare_inserted = if let Some(rest) = entry.strip_prefix("+.") {
-                trie.insert(rest, ())
+            // `CompactDomainTrie` preserves mihomo's exact, `*.` and `.`
+            // forms, including `+.` matching both the bare host and all
+            // subdomains. Invalid marker-only entries are rejected here to
+            // retain the old DomainTrie acceptance and count semantics.
+            let valid = if entry.is_empty() {
+                false
+            } else if let Some(rest) = entry.strip_prefix("+.") {
+                !rest.is_empty()
+            } else if let Some(rest) = entry.strip_prefix("*.") {
+                !rest.is_empty()
+            } else if let Some(rest) = entry.strip_prefix('.') {
+                !rest.is_empty()
             } else {
                 true
             };
-            if inserted || bare_inserted {
+            if valid {
+                patterns.push(entry.to_owned());
+                // Domain rule providers historically add the bare host for
+                // `+.domain`; keep that apex match while the compact trie
+                // stores the wildcard forms in one node.
+                if let Some(rest) = entry.strip_prefix("+.") {
+                    patterns.push(rest.to_owned());
+                }
                 count += 1;
             } else {
                 warn!("rule-set (domain): skipping invalid entry '{}'", entry);
             }
         }
-        trie.seal();
+        let trie = CompactDomainTrie::from_patterns(patterns.iter().map(String::as_str));
         Self { trie, count }
     }
 }
@@ -301,7 +317,7 @@ impl RuleSet for DomainRuleSet {
         if host.is_empty() {
             return false;
         }
-        self.trie.search(host).is_some()
+        self.trie.search(host)
     }
 
     fn len(&self) -> usize {
@@ -309,7 +325,7 @@ impl RuleSet for DomainRuleSet {
     }
 
     fn matches_domain(&self, domain: &str) -> bool {
-        self.trie.search(domain).is_some()
+        self.trie.search(domain)
     }
 }
 
