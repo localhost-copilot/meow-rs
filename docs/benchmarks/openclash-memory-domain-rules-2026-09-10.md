@@ -30,3 +30,8 @@ Validation after restoring the candidate:
   including the GeoSite RSS stress tests.
 
 No node configuration, credentials, or provider payloads are included here.
+
+The follow-up implementation in commit `5ee62f3` keeps provider pattern views
+borrowed during construction, avoiding a temporary clone of every entry and
+reducing startup allocation pressure. Its ARM64 release hash is
+`85907f04440f0b6e84a6b0c304efaa291b1985cdd4a4d1d4ff0987f3023515d4`.
