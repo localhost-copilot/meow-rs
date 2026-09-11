@@ -111,7 +111,7 @@ impl CompactDomainTrie {
     }
 
     /// Number of patterns accepted by the builder. Duplicate patterns are
-    /// counted just like [`DomainTrie::insert`] counts them.
+    /// counted just like [`super::DomainTrie::insert`] counts them.
     pub fn len(&self) -> usize {
         self.len
     }
