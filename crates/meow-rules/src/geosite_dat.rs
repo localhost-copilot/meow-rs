@@ -22,10 +22,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use meow_trie::DomainTrie;
 use tracing::warn;
 
 use crate::geosite::GeositeDB;
+use meow_trie::CompactDomainTrie;
 
 /// Protobuf wire-type tags we care about.
 const WIRE_VARINT: u32 = 0;
@@ -68,7 +68,10 @@ pub fn from_dat_bytes(
     allowed: Option<&HashSet<String>>,
 ) -> Result<GeositeDB, DatError> {
     let mut r = PbReader::new(data);
-    let mut categories: HashMap<String, DomainTrie<()>> = HashMap::new();
+    // Keep domain patterns flat while decoding. Building the compact trie only
+    // after the protobuf entry has been collected avoids retaining the generic
+    // per-node representation used by ordinary rule sets.
+    let mut category_patterns: HashMap<String, Vec<String>> = HashMap::new();
     let mut counts: HashMap<String, usize> = HashMap::new();
     let mut regex_patterns: HashMap<String, Vec<String>> = HashMap::new();
     let mut keyword_patterns: HashMap<String, Vec<String>> = HashMap::new();
@@ -83,7 +86,7 @@ pub fn from_dat_bytes(
         let entry_bytes = r.read_length_delimited()?;
         parse_geosite_entry(
             entry_bytes,
-            &mut categories,
+            &mut category_patterns,
             &mut counts,
             &mut regex_patterns,
             &mut keyword_patterns,
@@ -102,7 +105,16 @@ pub fn from_dat_bytes(
         );
     }
 
-    Ok(GeositeDB::from_parts(
+    let categories = category_patterns
+        .into_iter()
+        .map(|(name, patterns)| {
+            (
+                name,
+                CompactDomainTrie::from_patterns(patterns.iter().map(String::as_str)),
+            )
+        })
+        .collect();
+    Ok(GeositeDB::from_compact_parts(
         categories,
         counts,
         regex_patterns,
@@ -112,7 +124,7 @@ pub fn from_dat_bytes(
 
 fn parse_geosite_entry<'a>(
     data: &'a [u8],
-    categories: &mut HashMap<String, DomainTrie<()>>,
+    categories: &mut HashMap<String, Vec<String>>,
     counts: &mut HashMap<String, usize>,
     regex_patterns: &mut HashMap<String, Vec<String>>,
     keyword_patterns: &mut HashMap<String, Vec<String>>,
@@ -279,7 +291,7 @@ fn parse_attribute_key(data: &[u8]) -> Result<Option<String>, DatError> {
 
 fn insert_domain_entry(
     entry: &ParsedDomainEntry,
-    trie: &mut DomainTrie<()>,
+    patterns: &mut Vec<String>,
     regexes: &mut Vec<String>,
     keywords: &mut Vec<String>,
     skipped: &mut SkipStats,
@@ -301,10 +313,14 @@ fn insert_domain_entry(
         }
         DOMAIN_TYPE_DOMAIN => {
             let pat = format!("+.{value}");
-            let _ = trie.insert(&value, ());
-            trie.insert(&pat, ())
+            patterns.push(value);
+            patterns.push(pat);
+            true
         }
-        DOMAIN_TYPE_FULL => trie.insert(&value, ()),
+        DOMAIN_TYPE_FULL => {
+            patterns.push(value);
+            true
+        }
         _ => false,
     }
 }

@@ -5,3 +5,6 @@
 
 mod trie;
 pub use trie::DomainTrie;
+
+mod compact;
+pub use compact::CompactDomainTrie;
