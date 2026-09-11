@@ -35,3 +35,9 @@ The follow-up implementation in commit `5ee62f3` keeps provider pattern views
 borrowed during construction, avoiding a temporary clone of every entry and
 reducing startup allocation pressure. Its ARM64 release hash is
 `85907f04440f0b6e84a6b0c304efaa291b1985cdd4a4d1d4ff0987f3023515d4`.
+
+The subsequent metadata optimizations (`675b0dc` and `f579c9e`) removed the
+duplicate regex source string and inlined short rule-set names/adapters. The
+final ARM64 binary (`9b3babec167c32aa80143661a3eb07a11fcba0fcec68b51d608830955eeac1a7`)
+measured 30,136 KiB RSS, 19,788 KiB anonymous RSS, and 47,416 KiB HWM on the
+same router; both AnyConnect HTTPS checks remained successful.
