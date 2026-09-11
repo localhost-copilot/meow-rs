@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use meow_common::{Metadata, Rule, RuleMatchHelper, RuleType};
+use smol_str::SmolStr;
 
 use crate::rule_set::RuleSet;
 
@@ -8,18 +9,18 @@ use crate::rule_set::RuleSet;
 /// delegates matching to an `Arc<dyn RuleSet>` loaded by the rule-provider
 /// subsystem.
 pub struct RuleSetRule {
-    name: String,
+    name: SmolStr,
     set: Arc<dyn RuleSet>,
-    adapter: String,
+    adapter: SmolStr,
     no_resolve: bool,
 }
 
 impl RuleSetRule {
     pub fn new(name: &str, set: Arc<dyn RuleSet>, adapter: &str, no_resolve: bool) -> Self {
         Self {
-            name: name.to_string(),
+            name: SmolStr::new(name),
             set,
-            adapter: adapter.to_string(),
+            adapter: SmolStr::new(adapter),
             no_resolve,
         }
     }
