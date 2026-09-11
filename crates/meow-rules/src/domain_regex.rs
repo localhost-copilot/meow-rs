@@ -3,7 +3,6 @@ use regex::Regex;
 
 pub struct DomainRegexRule {
     regex: Regex,
-    pattern: String,
     adapter: String,
 }
 
@@ -12,7 +11,6 @@ impl DomainRegexRule {
         let regex = Regex::new(pattern)?;
         Ok(Self {
             regex,
-            pattern: pattern.to_string(),
             adapter: adapter.to_string(),
         })
     }
@@ -32,6 +30,8 @@ impl Rule for DomainRegexRule {
     }
 
     fn payload(&self) -> &str {
-        &self.pattern
+        // `Regex` owns the original pattern, so retaining a second String
+        // here would duplicate every regex rule's source text.
+        self.regex.as_str()
     }
 }
