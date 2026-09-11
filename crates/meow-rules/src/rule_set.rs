@@ -19,7 +19,7 @@ use meow_common::{Metadata, Rule, RuleMatchHelper};
 use meow_trie::CompactDomainTrie;
 use tracing::warn;
 
-use crate::parser::{ParserContext, parse_rule};
+use crate::parser::{parse_rule, ParserContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RuleSetBehavior {
@@ -135,8 +135,8 @@ pub fn build_rule_set_from_mrs_with_behavior(
     expected: Option<RuleSetBehavior>,
 ) -> Result<Box<dyn RuleSet>, String> {
     use crate::mrs_parser::{
-        TYPE_CLASSICAL, TYPE_DOMAIN, TYPE_IPCIDR, ZSTD_MAGIC, decompress_payload, parse_header,
-        parse_upstream_ruleset_mrs,
+        decompress_payload, parse_header, parse_upstream_ruleset_mrs, TYPE_CLASSICAL, TYPE_DOMAIN,
+        TYPE_IPCIDR, ZSTD_MAGIC,
     };
     if bytes.len() >= 4 && bytes[..4] == ZSTD_MAGIC {
         let payload = parse_upstream_ruleset_mrs(bytes).map_err(|e| e.to_string())?;
